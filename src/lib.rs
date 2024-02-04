@@ -1,4 +1,4 @@
-mod server;
 mod query_engine;
+pub mod server;
 mod storage_engine;
 mod utils;
