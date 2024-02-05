@@ -1,21 +1,47 @@
+use std::sync::Arc;
+
+use crate::storage_engine::{self, StorageEngine};
 use crate::utils::log;
 
+use log::debug;
+use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserError};
-use sqlparser::ast::Statement;
+use tokio::sync::Mutex;
 
 pub struct NaadanParser;
 impl NaadanParser {
-    pub fn parse(query: &str) -> Result<Vec<Statement>, ParserError>
-    {
-        log(format!("\n =======\nParsing query {:?}\n =======", query));
-        
+    pub fn parse(query: &str) -> Result<Vec<Statement>, ParserError> {
+        debug!("=======\nParsing query {:?}\n =======", query);
+
         let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
         let ast = Parser::parse_sql(&dialect, query).unwrap();
 
-        log(format!("Parsed AST is {:?}", ast));
+        debug!("Parsed AST is {:?}", ast);
 
         Ok(ast)
+    }
+}
+
+pub struct NaadanQueryEngine {
+    pub storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>,
+}
+
+impl NaadanQueryEngine {
+    pub fn init(storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>) -> Self {
+        Self {
+            storage_engine: storage_engine,
+        }
+    }
+
+    pub fn plan(&self, query: & NaadanQuery) -> Result<bool, bool> {
+        // Plan
+
+        Ok(true)
+    }
+
+    pub fn execute(&self) -> Result<bool, bool> {
+        Ok(true)
     }
 }
 
@@ -27,30 +53,17 @@ pub struct NaadanQuery {
 }
 
 impl NaadanQuery {
-    pub fn new(query: String) -> Self {
+    pub fn init(query: String) -> Self {
         Self {
-            query_string: query,
+            query_string: query.clone(),
             params: vec![],
-            ast: vec![],
+            ast: NaadanParser::parse(&query).unwrap(),
         }
     }
 
     pub fn add_param(&mut self, param1: String) -> &mut Self {
         self.params.push(param1);
         self
-    }
-
-    pub fn execute(&mut self) -> Result<bool, bool> {
-        // Parse
-        self.ast = NaadanParser::parse(&self.query_string).unwrap();
-
-        // Plan
-
-        // Optimize
-
-        // Execute
-
-        Ok(true)
     }
 }
 
@@ -60,14 +73,10 @@ mod tests {
 
     #[test]
     fn Test_Query() {
-        let mut query = NaadanQuery::new("select * from table1".to_string());
+        let mut query = NaadanQuery::init("select * from table1".to_string());
 
         query.add_param("name".to_string());
         query.add_param("query2".to_string());
-        let query_status = query.execute();
-
-        let log_string = format!("Query status {:?}", query_status);
-        log(log_string);
     }
 
     #[test]
@@ -78,7 +87,7 @@ mod tests {
                    ORDER BY a DESC, b";
 
         let ast = NaadanParser::parse(sql);
-        
+
         let sql = "SELECT distinct 2 as w, a, b \
                    FROM table_2 \
                    WHERE a > 100 \
@@ -87,4 +96,3 @@ mod tests {
         let ast = NaadanParser::parse(sql);
     }
 }
-
