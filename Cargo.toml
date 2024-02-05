@@ -13,6 +13,7 @@ sqlparser = "0.43.1"
 log = "0.4"
 tokio = { version = "1", features = ["full"] }
 env_logger = "0.11.1"
+rand = "0.8"
 
 [lib]
 name = "libnaadandb"

@@ -5,9 +5,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::prelude::*;
 
-trait StorageEngine {
-    fn init(page_count: usize) -> Self;
-
+pub trait StorageEngine: std::fmt::Debug {
     fn read_row(&mut self, row_id: usize) -> Result<RowData, usize>;
 
     fn read_rows(&mut self, row_id: &[usize]) -> Result<(), ()>;
@@ -20,14 +18,14 @@ trait StorageEngine {
 }
 
 // Storage Engine implementation
+#[derive(Debug)]
 pub struct OurStorageEngine {
     buffer_pool: BufferPool,
     row_index: HashMap<usize, usize>,
     engine_metadata_store: Vec<usize>,
 }
-
-impl StorageEngine for OurStorageEngine {
-    fn init(page_count: usize) -> Self {
+impl OurStorageEngine {
+    pub fn init(page_count: usize) -> Self {
         Self {
             buffer_pool: BufferPool {
                 buffer_metadata: "metadata".to_string(),
@@ -37,7 +35,9 @@ impl StorageEngine for OurStorageEngine {
             engine_metadata_store: vec![],
         }
     }
+}
 
+impl StorageEngine for OurStorageEngine {
     fn reset_memory(&mut self) {
         log(format!("Resetting StorageEngine memory !!"));
         self.buffer_pool.page_pool.clear();
@@ -151,8 +151,8 @@ pub struct PageHeader {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RowData {
-    null_map: Vec<usize>,
-    row_data: Vec<u8>,
+    pub null_map: Vec<usize>,
+    pub row_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
