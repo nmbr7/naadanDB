@@ -3,7 +3,7 @@ use std::{
     str::from_utf8,
 };
 
-use log::{debug, info, trace};
+use log::{debug, error, info, trace};
 use rand::Rng;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -14,7 +14,7 @@ use tokio::{
 use std::sync::Arc;
 
 use crate::{
-    query_engine::{self, NaadanQueryEngine},
+    query_engine::{self, NaadanQuery, NaadanQueryEngine},
     server,
     storage_engine::{self, OurStorageEngine, RowData, StorageEngine},
 };
@@ -46,80 +46,98 @@ impl NaadanServer {
         let ip_port = format!("0.0.0.0:{}", self.config.port);
         let listener = TcpListener::bind(ip_port).await.unwrap();
 
-        let server_instance = Arc::new(Mutex::new(self));
+        let server_instance = Arc::new(self);
 
         let mut rng = rand::thread_rng();
 
-        let n = rng.gen_range(0..100);
+        // let n = rng.gen_range(0..100);
 
         loop {
             let (socket, _) = listener.accept().await.unwrap();
             let n = rng.gen_range(0..100);
             let server_instance_clone = server_instance.clone();
             tokio::spawn(async move {
-                Self::process_request(server_instance_clone, socket, n).await;
+                match Self::process_request(server_instance_clone, socket, n).await {
+                    Ok(()) => debug!("Query successfully completed"),
+                    Err(_) => error!("Query exec failed!"),
+                }
             });
         }
     }
 
     async fn process_request(
-        server_instance: Arc<Mutex<NaadanServer>>,
+        server_instance: Arc<NaadanServer>,
         mut socket: TcpStream,
-        n: usize,
-    ) -> bool {
-        info!("Got new request: {:?}", socket);
+        _n: usize,
+    ) -> Result<(), bool> {
+        info!("Got new request from IP: {:?}", socket.peer_addr());
+
         let buffer: &mut Vec<u8> = &mut Vec::new();
-        let mut count = 0;
-        loop {
-            let bytes = socket.read_buf(buffer).await.unwrap();
-            if 0 == bytes {
-                if buffer.is_empty() {
-                    return true;
-                } else {
-                    return false;
-                }
-            }
+        let sql_statement = match get_query_from_request(&mut socket, buffer).await {
+            Ok(value) => value,
+            Err(value) => return Err(value),
+        };
 
-            count += bytes;
+        debug!("Read query data: {}", sql_statement);
 
-            if (buffer.as_slice()[(count - bytes)..count] == b"EOF\n".to_vec()) {
-                break;
+        // Init and parse the query string to AST
+        let sql_query = match NaadanQuery::init(sql_statement.to_string()) {
+            Ok(res) => res,
+            Err(err) => {
+                let _ = socket.write(err.to_string().as_bytes()).await;
+                return Err(false);
             }
+        };
+
+        {
+            // Create a reference to the shared storage engine
+            let storage_engine_instance = server_instance.storage_engine.clone();
+            let query_engine = NaadanQueryEngine::init(storage_engine_instance);
+
+            // Create logical plan for the query from the AST
+            let _cal = query_engine.plan(&sql_query).unwrap();
+            debug!("{:?}", _cal);
+
+            // TODO: Prepare teh physical plan
+
+            // TODO: execute the queries using the physical plan
+            let _res = query_engine.execute();
+
+            // TODO craft the response message
         }
 
-        debug!("Read data: {}", from_utf8(&buffer[..(count - 4)]).unwrap());
-
-        let sql_statement = from_utf8(&buffer[..(count - 4)]).unwrap();
-        let sql_query = query_engine::NaadanQuery::init(sql_statement.to_string());
-
-        let server_inst = server_instance.lock().await;
-        let storage_engine_instance = server_inst.storage_engine.clone();
-        let query_engine = NaadanQueryEngine::init(storage_engine_instance);
-
-        let cal = query_engine.plan(&sql_query);
-
-        let res = query_engine.execute();
-
-        // let row_data = RowData {
-        //     null_map: vec![1, 2],
-        //     row_data: vec![1, 2],
-        // };
-
-        // println!("Random Number {}", n);
-        // let mut row_id: usize = n;
-
-        // s_engine.write_row(&row_id, &row_data);
-
-        // println!("\n Reading 1 \n");
-        // s_engine.read_row(row_id);
-
         let result = [0 as u8];
-        socket.write(&result).await;
+        let _ = socket.write(&result).await;
 
-        true
+        Ok(())
     }
 
     pub fn stop(self: Self) {
         trace!("Stopping naadanDB server")
     }
+}
+
+async fn get_query_from_request<'a>(
+    socket: &'a mut TcpStream,
+    buffer: &'a mut Vec<u8>,
+) -> Result<&'a str, bool> {
+    let mut count = 0;
+    loop {
+        let bytes = socket.read_buf(buffer).await.unwrap();
+        if 0 == bytes {
+            if buffer.is_empty() {
+                return Err(true);
+            } else {
+                return Err(false);
+            }
+        }
+
+        count += bytes;
+
+        if buffer.as_slice()[(count - bytes)..count] == b"EOF\n".to_vec() {
+            break;
+        }
+    }
+
+    Ok(from_utf8(&buffer[..(count - 4)]).unwrap())
 }
