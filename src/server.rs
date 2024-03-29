@@ -14,6 +14,7 @@ use tokio::{
 use std::sync::Arc;
 
 use crate::{
+    catalog::NaadanCatalog,
     query_engine::{self, NaadanQuery, NaadanQueryEngine},
     server,
     storage_engine::{self, OurStorageEngine, RowData, StorageEngine},
@@ -92,13 +93,14 @@ impl NaadanServer {
         {
             // Create a reference to the shared storage engine
             let storage_engine_instance = server_instance.storage_engine.clone();
-            let query_engine = NaadanQueryEngine::init(storage_engine_instance);
+            let query_engine = NaadanQueryEngine::init(storage_engine_instance).await;
 
             // Create logical plan for the query from the AST
-            let _cal = query_engine.plan(&sql_query).unwrap();
+            let _cal = query_engine.plan(&sql_query).await.unwrap();
             debug!("{:?}", _cal);
 
-            // TODO: Prepare teh physical plan
+            // TODO: Prepare the physical plan
+            //let _db_catalog = NaadanCatalog::default();
 
             // TODO: execute the queries using the physical plan
             let _res = query_engine.execute();

@@ -1,18 +1,25 @@
+use core::time;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use crate::catalog::{Column, Table};
 use crate::plan::{
     Edge, Plan, PlanExpr, PlanGroup, Relational, RelationalExprType, Scalar, ScalarExprType,
+    ScanExpr, Stats,
 };
 use crate::storage_engine::StorageEngine;
 
+use env_logger::fmt::Timestamp;
 use log::debug;
+use serde_json::error;
 use sqlparser::ast::{SetExpr, Statement, TableFactor};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserError};
 use tokio::sync::Mutex;
+use tokio::task;
 
 pub struct NaadanParser;
 impl NaadanParser {
@@ -39,22 +46,24 @@ pub struct NaadanQueryEngine {
 }
 
 impl NaadanQueryEngine {
-    pub fn init(storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>) -> Self {
+    pub async fn init(storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>) -> Self {
         Self {
             storage_engine: storage_engine,
         }
     }
 
-    pub fn plan<'a>(&self, query: &'a NaadanQuery) -> Result<Vec<Plan<'a>>, bool> {
-        let mut final_plan_list: Vec<Plan> = vec![];
+    pub async fn plan<'a>(&'a self, query: &'a NaadanQuery) -> Result<Vec<Plan<'a>>, bool> {
+        let mut final_plan_list: Vec<Plan<'a>> = vec![];
         // Iterate through the AST and create best logical plan which potentially has the least cost of execution
 
         // TODO: Read from the DB catalog to get info about the the table (table name id, row count, columns etc..)
         // based on the info from the catalog info, validate the query.
         for statement in query.ast.iter() {
             let mut plan: Plan = Plan {
-                estimated_row_count: 0,
-                estimated_time: Duration::from_millis(0),
+                plan_stats: Some(Stats {
+                    estimated_row_count: 0,
+                    estimated_time: Duration::from_millis(0),
+                }),
                 plan_expr_root: None,
             };
 
@@ -71,7 +80,7 @@ impl NaadanQueryEngine {
                     match &*query_data.body {
                         SetExpr::Select(select_query) => {
                             //  Get the query target Tables as in the 'FROM' expression
-                            let expr_group = Self::process_table(select_query).unwrap();
+                            let expr_group = self.process_table(select_query).unwrap();
                             debug!("{:#?}", expr_group);
                             let first_vec = expr_group.first().unwrap();
                             let first_expr = Rc::clone(first_vec.borrow().exprs.first().unwrap());
@@ -134,22 +143,50 @@ impl NaadanQueryEngine {
     }
 
     fn process_table(
+        self: &Self,
         select_query: &Box<sqlparser::ast::Select>,
     ) -> Result<Vec<Edge<PlanGroup>>, bool> {
         let mut plan_group_list: Vec<Edge<PlanGroup>> = vec![];
         for table in select_query.from.iter() {
             match &table.relation {
                 TableFactor::Table { name, .. } => {
-                    debug!(" Select query on Table {}", name.0.first().unwrap().value);
+                    let table_name = &name.0.first().unwrap().value;
+                    let table_id: u16;
+                    let table_schema: HashMap<String, Column>;
+                    {
+                        let storage_instance = task::block_in_place(move || {
+                            println!("Locking storage_instance {:?}", SystemTime::now());
+                            self.storage_engine.blocking_lock()
+                            // do some compute-heavy work or call synchronous code
+                        });
+
+                        match storage_instance.get_table_details(table_name) {
+                            Ok(table_catalog) => {
+                                table_id = table_catalog.id;
+                                table_schema = table_catalog.schema.clone();
+                            }
+                            Err(_) => {
+                                debug!(" Invalid Table {}", table_name);
+                                return Err(false);
+                            }
+                        }
+                    }
+
+                    debug!(" Select query on Table {}", table_name);
                     let value = PlanExpr::Relational(Relational {
-                        rel_type: RelationalExprType::ScanExpr { table_id: 1 },
+                        rel_type: RelationalExprType::ScanExpr(ScanExpr::new(
+                            table_id,
+                            table_schema,
+                        )),
                         group: None,
+                        stats: Some(Stats {
+                            estimated_row_count: 0,
+                            estimated_time: Duration::from_millis(0),
+                        }),
                     });
 
                     let expr_group = Self::init_plan_expr(value).unwrap();
                     plan_group_list.push(expr_group);
-                    // TODO: Get the table id from the catalog table
-                    // self.storage_engine.lock()
                 }
                 // TODO
                 // sqlparser::ast::TableFactor::Derived { lateral, subquery, alias } => todo!(),
@@ -177,6 +214,10 @@ impl NaadanQueryEngine {
                                 value: identifier.value.clone(),
                             },
                             group: None,
+                            stats: Some(Stats {
+                                estimated_row_count: 0,
+                                estimated_time: Duration::from_millis(0),
+                            }),
                         });
 
                         let expr_group = Self::init_plan_expr(value).unwrap();
