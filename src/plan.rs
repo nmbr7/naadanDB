@@ -23,8 +23,23 @@ impl ScanExpr {
 }
 
 #[derive(Debug)]
+pub struct CreateTableExpr {
+    pub table_name: String,
+    pub columns: HashMap<String, Column>,
+}
+
+#[derive(Debug)]
+pub struct InsertExpr {
+    pub table_name: String,
+    pub columns: HashMap<String, String>,
+}
+
+#[derive(Debug)]
 pub enum RelationalExprType<'a> {
     ScanExpr(ScanExpr),
+    CreateTableExpr(CreateTableExpr),
+    InsertExpr(InsertExpr),
+
     InnerJoinExpr(Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>),
     FilterExpr(Edge<PlanExpr<'a>>),
     IndexScanExpr { index_id: u32 },
@@ -90,3 +105,7 @@ pub struct Plan<'a> {
     pub plan_stats: Option<Stats>,
     pub plan_expr_root: Option<Edge<PlanExpr<'a>>>,
 }
+
+unsafe impl<'a> Send for Plan<'a> {}
+
+unsafe impl<'a> Sync for Plan<'a> {}

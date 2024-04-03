@@ -1,6 +1,8 @@
 use core::panic;
 use std::collections::{HashMap, HashSet};
 
+use sqlparser::ast::DataType;
+
 #[derive(Debug, Default)]
 pub struct Database {
     pub id: u16,
@@ -19,14 +21,14 @@ pub struct Table {
 #[derive(Debug, Default, Clone)]
 pub struct Column {
     pub column_type: ColumnType,
-    pub is_null: bool,
+    pub is_nullable: bool,
 }
 
 impl Column {
     pub fn new(column_type: ColumnType, is_null: bool) -> Self {
         Self {
             column_type,
-            is_null,
+            is_nullable: is_null,
         }
     }
 }
@@ -34,12 +36,27 @@ impl Column {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub enum ColumnType {
     #[default]
-    Int = 0,
+    UnSupported = 0,
+    Int,
     Float,
     Bool,
     String,
     Binary,
     DateTime,
+}
+
+impl From<&DataType> for ColumnType {
+    fn from(item: &DataType) -> Self {
+        match item {
+            DataType::Varchar(Some(val)) => Self::String,
+            DataType::Bool => Self::Bool,
+            DataType::Int(val) => Self::Int,
+            DataType::Float(Some(val)) => Self::Float,
+            DataType::Datetime(Some(val)) => Self::DateTime,
+            DataType::Binary(Some(val)) => Self::Binary,
+            _ => Self::UnSupported,
+        }
+    }
 }
 
 impl ColumnType {
