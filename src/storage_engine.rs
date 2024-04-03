@@ -9,7 +9,7 @@ use std::{
     fs::File,
     io::{BufWriter, Bytes, Cursor, Read, Seek, Write},
     mem,
-    ops::{Shl, ShlAssign},
+    ops::Shl,
     string,
 };
 
@@ -25,6 +25,8 @@ enum WriteType {
 
 pub trait StorageEngine: std::fmt::Debug {
     fn get_table_details(&self, name: &String) -> Result<catalog::Table, bool>;
+
+    fn add_table(&mut self, table: &catalog::Table) -> Result<(), bool>;
 
     fn read_row(&mut self, row_id: usize) -> Result<&RowData, bool>;
 
@@ -148,6 +150,14 @@ impl StorageEngine for OurStorageEngine {
         self.catalog_page.get(&1).unwrap().get_table_details(name)
     }
 
+    fn add_table(&mut self, table: &catalog::Table) -> Result<(), bool> {
+        let catalog_page = self.catalog_page.get_mut(&1).unwrap();
+        catalog_page.write_table_details(table);
+        catalog_page.flush_catalog_page();
+
+        Ok(())
+    }
+
     fn reset_memory(&mut self) {
         log(format!("Resetting StorageEngine memory !!"));
         self.buffer_pool.page_pool.clear();
@@ -240,8 +250,8 @@ pub struct RowData {
     pub data: Vec<u8>,
 }
 
-trait CatalogPage {
-    fn init();
+pub trait CatalogPage {
+    //fn init();
 
     fn get_table_details(&self, name: &String) -> Result<catalog::Table, bool>;
 
@@ -309,9 +319,9 @@ pub struct Page {
 }
 
 impl CatalogPage for Page {
-    fn init() {
-        todo!()
-    }
+    // fn init() {
+    //     todo!()
+    // }
 
     fn get_table_details(&self, name: &String) -> Result<catalog::Table, bool> {
         let split_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
@@ -581,6 +591,18 @@ impl Page {
         Ok(page)
     }
 
+    pub fn flush_catalog_page(&self) -> Result<(), bool> {
+        match File::options().write(true).open(DB_TABLE_CATALOG_FILE) {
+            Ok(mut file) => {
+                let write_bytes = bincode::serialize(&self).unwrap();
+                file.write_all(write_bytes.as_slice()).unwrap();
+
+                Ok(())
+            }
+            Err(_) => Err(false),
+        }
+    }
+
     pub fn read_catalog_from_disk() -> Result<Page, u32> {
         match File::options().read(true).open(DB_TABLE_CATALOG_FILE) {
             Ok(mut file) => {
@@ -748,15 +770,13 @@ mod tests {
     use super::*;
     extern crate stats_alloc;
 
-    const ASCII_u8_1: u8 = '1' as u8;
-    const ASCII_1: u32 = ASCII_u8_1 as u32;
-    use sqlparser::ast::Table;
+    const ASCII_U8_1: u8 = '1' as u8;
+    const ASCII_1: u32 = ASCII_U8_1 as u32;
+
     use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
     use std::alloc::System;
     use std::collections::HashSet;
     use std::fs;
-    use std::thread::sleep;
-    use std::time::Duration;
 
     #[global_allocator]
     static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;

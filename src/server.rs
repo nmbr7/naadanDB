@@ -107,7 +107,7 @@ impl NaadanServer {
             debug!("Logical Plan is : {:?}", logical_plan);
 
             // Prepare the physical plan
-            let pp_result = query_engine.prepare_exec_plan(&logical_plan).await;
+            let pp_result = query_engine.prepare_exec_plan(&logical_plan);
             let physical_plan = match pp_result {
                 Ok(val) => val,
                 Err(err) => {
@@ -117,7 +117,7 @@ impl NaadanServer {
             };
 
             // Execute the queries using the physical plan
-            let res = query_engine.execute(logical_plan, physical_plan);
+            let res = query_engine.execute(physical_plan);
             match res {
                 Ok(val) => {
                     result = val;
