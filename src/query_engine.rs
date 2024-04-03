@@ -1,23 +1,58 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
-use crate::catalog::{Column, ColumnType};
+use crate::catalog::{self, Column, ColumnType};
 use crate::plan::{
-    CreateTableExpr, Edge, Plan, PlanExpr, PlanGroup, Relational, RelationalExprType, Scalar,
-    ScalarExprType, ScanExpr, Stats,
+    Edge, PhysicalPlan, PhysicalPlanExpr, Plan, PlanExecFn, PlanExpr, PlanGroup, Relational,
+    RelationalExprType, Scalar, ScalarExprType, ScanExpr, Stats,
 };
-use crate::storage_engine::{Page, StorageEngine};
+use crate::storage_engine::StorageEngine;
 
-use log::debug;
-use sqlparser::ast::{DataType, SetExpr, Statement, TableFactor};
+use log::{debug, error};
+use sqlparser::ast::{SetExpr, Statement, TableFactor};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserError};
 use tokio::sync::Mutex;
 use tokio::task;
+
+pub struct ExecContext {
+    last_result: Option<Vec<u8>>,
+    last_op_name: Option<String>,
+    last_op_time: Option<Duration>,
+    last_op_status: Option<bool>,
+
+    pub storage_engine: Option<Arc<Mutex<Box<dyn StorageEngine + Send>>>>,
+}
+
+impl ExecContext {
+    pub fn init() -> Self {
+        Self {
+            last_result: None,
+            last_op_name: None,
+            last_op_time: None,
+            storage_engine: None,
+            last_op_status: None,
+        }
+    }
+
+    pub fn last_result(&self) -> Option<&Vec<u8>> {
+        self.last_result.as_ref()
+    }
+
+    pub fn set_storage_engine(
+        &mut self,
+        storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>,
+    ) {
+        self.storage_engine = Some(storage_engine);
+    }
+    pub fn get_storage_engine(&mut self) -> Option<&Arc<Mutex<Box<dyn StorageEngine + Send>>>> {
+        self.storage_engine.as_ref()
+    }
+}
 
 pub struct NaadanParser;
 impl NaadanParser {
@@ -39,39 +74,57 @@ impl NaadanParser {
     }
 }
 
-pub struct ExecContext {
-    last_result: Option<Vec<u8>>,
-    last_op_name: Option<String>,
-    last_op_time: Option<Duration>,
-}
+fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
+    debug!("creating table");
 
-impl ExecContext {
-    pub fn init() -> Self {
-        Self {
-            last_result: None,
-            last_op_name: None,
-            last_op_time: None,
+    let mut error = false;
+    let mut invalid_type = false;
+
+    match physical_plan {
+        PhysicalPlanExpr::Relational(val) => match val {
+            RelationalExprType::CreateTableExpr(expr) => {
+                let table = catalog::Table {
+                    name: expr.table_name,
+                    schema: expr.columns,
+                    indexes: HashSet::new(),
+                    id: 0,
+                };
+                {
+                    let mut storage_instance = task::block_in_place(|| {
+                        println!("Locking storage_instance {:?}", SystemTime::now());
+                        exec_context.get_storage_engine().unwrap().blocking_lock()
+                        // do some compute-heavy work or call synchronous code
+                    });
+
+                    match storage_instance.get_table_details(&table.name) {
+                        Ok(_) => {
+                            debug!("Table '{}' already exists", &table.name);
+                            error = true;
+                        }
+                        Err(_) => {
+                            storage_instance.add_table(&table).unwrap();
+                        }
+                    }
+                }
+            }
+            _ => invalid_type = true,
+        },
+        _ => invalid_type = true,
+    }
+
+    if error {
+        exec_context.last_op_status = Some(false);
+        if invalid_type {
+            error!("Create table with wrong expr type ");
         }
+    } else {
+        exec_context.last_op_status = Some(true);
     }
 }
 
-fn create_table(
-    context: &mut ExecContext,
-    table_expr: Option<RelationalExprType>,
-    scalar_val: Option<ScalarExprType>,
-) {
-    debug!("creating table");
-}
-
-fn scan_table(
-    context: &mut ExecContext,
-    table_expr: Option<RelationalExprType>,
-    scalar_val: Option<ScalarExprType>,
-) {
+fn scan_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
     debug!("scaning table");
 }
-
-type PlanExecFn = fn(context: &mut ExecContext, Option<RelationalExprType>, Option<ScalarExprType>);
 
 pub struct NaadanQueryEngine {
     pub storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>,
@@ -84,28 +137,42 @@ impl NaadanQueryEngine {
         }
     }
 
-    pub async fn prepare_exec_plan<'a>(
+    pub fn prepare_exec_plan<'a>(
         &'a self,
         logical_plan: &Vec<Plan<'a>>,
-    ) -> Result<Vec<PlanExecFn>, bool> {
-        let mut exec_vec: Vec<PlanExecFn> = Vec::new();
+    ) -> Result<Vec<PhysicalPlan>, bool> {
+        let mut exec_vec: Vec<PhysicalPlan> = Vec::new();
 
         match logical_plan.last() {
             Some(plan) => {
-                let mut root_exp = (plan.plan_expr_root.as_ref().unwrap().borrow());
+                let root_exp = plan.plan_expr_root.as_ref().unwrap().borrow();
                 //   let ty = exp.borrow();
                 match &*root_exp {
                     PlanExpr::Relational(val) => match &val.rel_type {
                         RelationalExprType::ScanExpr(val) => {
-                            exec_vec.push(scan_table);
+                            let physical_plan_expr: PhysicalPlanExpr<'a> =
+                                PhysicalPlanExpr::Relational(RelationalExprType::ScanExpr(
+                                    val.clone(),
+                                ));
+                            let physical_plan: PhysicalPlan<'a> =
+                                PhysicalPlan::new(physical_plan_expr, scan_table);
+
+                            exec_vec.push(physical_plan);
                         }
                         RelationalExprType::CreateTableExpr(val) => {
-                            exec_vec.push(create_table);
+                            let physical_plan_expr: PhysicalPlanExpr<'a> =
+                                PhysicalPlanExpr::Relational(RelationalExprType::CreateTableExpr(
+                                    val.clone(),
+                                ));
+                            let physical_plan: PhysicalPlan<'a> =
+                                PhysicalPlan::new(physical_plan_expr, create_table);
+
+                            exec_vec.push(physical_plan);
                         }
                         RelationalExprType::InsertExpr(_) => todo!(),
                         RelationalExprType::InnerJoinExpr(_, _, _) => todo!(),
                         RelationalExprType::FilterExpr(_) => todo!(),
-                        RelationalExprType::IndexScanExpr { index_id } => todo!(),
+                        RelationalExprType::IndexScanExpr { index_id: _ } => todo!(),
                     },
 
                     _ => {}
@@ -123,7 +190,7 @@ impl NaadanQueryEngine {
         query: &'a NaadanQuery,
     ) -> Result<Vec<Plan<'a>>, bool> {
         let mut final_plan_list: Vec<Plan<'a>> = vec![];
-        // Iterate through the AST and create best logical plan which potentially has the least cost of execution
+        // Iterate through the AST and create best logical plan which potentially has the least f execution
 
         // TODO: Read from the DB catalog to get info about the the table (table name id, row count, columns etc..)
         // based on the info from the catalog info, validate the query.
@@ -137,42 +204,27 @@ impl NaadanQueryEngine {
             };
 
             match statement {
-                Statement::CreateTable {
-                    or_replace,
-                    temporary,
-                    external,
-                    global,
-                    if_not_exists,
-                    transient,
-                    name,
-                    columns,
-                    constraints,
-                    hive_distribution,
-                    hive_formats,
-                    table_properties,
-                    with_options,
-                    file_format,
-                    location,
-                    query,
-                    without_rowid,
-                    like,
-                    clone,
-                    engine,
-                    comment,
-                    auto_increment_offset,
-                    default_charset,
-                    collation,
-                    on_commit,
-                    on_cluster,
-                    order_by,
-                    partition_by,
-                    cluster_by,
-                    options,
-                    strict,
-                } => {
+                Statement::CreateTable { name, columns, .. } => {
                     let mut column_map: HashMap<String, Column> = HashMap::new();
+                    let table_name = name.0.last().unwrap().value.clone();
+                    {
+                        let storage_instance = task::block_in_place(move || {
+                            println!("Locking storage_instance {:?}", SystemTime::now());
+                            self.storage_engine.blocking_lock()
+                        });
+
+                        match storage_instance.get_table_details(&table_name) {
+                            Ok(_) => {
+                                debug!("Table '{}' already exists", &table_name);
+                                return Err(false);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+
                     for col in columns {
                         let mut is_nullable = false;
+
                         for opts in &col.options {
                             match &opts.option {
                                 sqlparser::ast::ColumnOption::Null => {
@@ -222,7 +274,7 @@ impl NaadanQueryEngine {
                     let local_plan = PlanExpr::Relational(Relational {
                         rel_type: RelationalExprType::CreateTableExpr(
                             crate::plan::CreateTableExpr {
-                                table_name: name.0.last().unwrap().value.clone(),
+                                table_name: table_name,
                                 columns: column_map,
                             },
                         ),
@@ -436,19 +488,28 @@ impl NaadanQueryEngine {
         Ok(plan_group_list)
     }
 
-    pub fn execute<'a>(
-        &self,
-        logical_plan: Vec<Plan<'a>>,
-        physical_plan: Vec<PlanExecFn>,
-    ) -> Result<Vec<u8>, bool> {
+    pub fn execute<'a>(&self, physical_plan: Vec<PhysicalPlan>) -> Result<Vec<u8>, bool> {
         debug!("Executing final query plan.");
 
+        // TODO let the scheduler decide how and where the execution will take place.
         let mut exec_context = ExecContext::init();
+        exec_context.set_storage_engine(self.storage_engine.clone());
+        let now = Instant::now();
         for plan in physical_plan {
-            plan(&mut exec_context, None, None);
+            (plan.plane_exec_fn)(&mut exec_context, plan.plan_expr);
         }
 
-        Ok(String::from("Plan executed success in 2ms").into())
+        let elapsed_time = now.elapsed();
+
+        if exec_context.last_op_status.unwrap() {
+            Ok(format!(
+                "Plan executed success in {:.3}ms",
+                elapsed_time.as_micros() as f64 / 1000.0
+            )
+            .into())
+        } else {
+            Err(false)
+        }
     }
 }
 

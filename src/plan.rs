@@ -2,15 +2,18 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::{Rc, Weak},
+    sync::Arc,
     time::Duration,
 };
 
-use crate::catalog::Column;
+use tokio::sync::Mutex;
+
+use crate::{catalog::Column, query_engine::ExecContext, storage_engine::StorageEngine};
 
 pub type Edge<T> = Rc<RefCell<T>>;
 type WeakEdge<T> = Weak<RefCell<T>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScanExpr {
     pub table_id: u16,
     pub schema: HashMap<String, Column>,
@@ -22,26 +25,27 @@ impl ScanExpr {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CreateTableExpr {
     pub table_name: String,
     pub columns: HashMap<String, Column>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct InsertExpr {
     pub table_name: String,
     pub columns: HashMap<String, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RelationalExprType<'a> {
     ScanExpr(ScanExpr),
     CreateTableExpr(CreateTableExpr),
     InsertExpr(InsertExpr),
 
-    InnerJoinExpr(Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>),
     FilterExpr(Edge<PlanExpr<'a>>),
+
+    InnerJoinExpr(Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>),
     IndexScanExpr { index_id: u32 },
 }
 
@@ -66,6 +70,33 @@ pub enum ScalarExprType {
         value: u64,
     },
 }
+
+#[derive(Debug)]
+pub enum PhysicalPlanExpr<'a> {
+    Relational(RelationalExprType<'a>),
+    Scalar(ScalarExprType),
+}
+
+pub type PlanExecFn = fn(context: &mut ExecContext, PhysicalPlanExpr);
+
+#[derive(Debug)]
+pub struct PhysicalPlan<'a> {
+    pub plan_expr: PhysicalPlanExpr<'a>,
+    pub plane_exec_fn: PlanExecFn,
+}
+
+impl<'a> PhysicalPlan<'a> {
+    pub fn new(plan_expr: PhysicalPlanExpr<'a>, plane_exec_fn: PlanExecFn) -> Self {
+        Self {
+            plan_expr,
+            plane_exec_fn,
+        }
+    }
+}
+
+unsafe impl<'a> Send for PhysicalPlan<'a> {}
+
+unsafe impl<'a> Sync for PhysicalPlan<'a> {}
 
 #[derive(Debug)]
 pub struct Relational<'a> {
