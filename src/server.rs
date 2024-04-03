@@ -20,8 +20,6 @@ use crate::{
     storage_engine::{self, OurStorageEngine, RowData, StorageEngine},
 };
 
-// TODO: setup a TCP server to accept DB connection and handle queries
-
 #[derive(Debug)]
 pub struct ServerConfig {
     pub port: u16,
@@ -60,7 +58,7 @@ impl NaadanServer {
             tokio::spawn(async move {
                 match Self::process_request(server_instance_clone, socket, n).await {
                     Ok(()) => debug!("Query successfully completed"),
-                    Err(_) => error!("Query exec failed!"),
+                    Err(_) => error!("Query execution failed."),
                 }
             });
         }
@@ -74,6 +72,7 @@ impl NaadanServer {
         info!("Got new request from IP: {:?}", socket.peer_addr());
 
         let buffer: &mut Vec<u8> = &mut Vec::new();
+        let mut result = vec![];
         let sql_statement = match get_query_from_request(&mut socket, buffer).await {
             Ok(value) => value,
             Err(value) => return Err(value),
@@ -96,20 +95,38 @@ impl NaadanServer {
             let query_engine = NaadanQueryEngine::init(storage_engine_instance).await;
 
             // Create logical plan for the query from the AST
-            let _cal = query_engine.plan(&sql_query).await.unwrap();
-            debug!("{:?}", _cal);
+            let lp_result = query_engine.prepare_logical_plan(&sql_query).await;
 
-            // TODO: Prepare the physical plan
-            //let _db_catalog = NaadanCatalog::default();
+            let logical_plan = match lp_result {
+                Ok(val) => val,
+                Err(err) => {
+                    socket.write(err.to_string().as_bytes()).await.unwrap();
+                    return Err(false);
+                }
+            };
+            debug!("Logical Plan is : {:?}", logical_plan);
 
-            // TODO: execute the queries using the physical plan
-            let _res = query_engine.execute();
+            // Prepare the physical plan
+            let pp_result = query_engine.prepare_exec_plan(&logical_plan).await;
+            let physical_plan = match pp_result {
+                Ok(val) => val,
+                Err(err) => {
+                    socket.write(err.to_string().as_bytes()).await.unwrap();
+                    return Err(false);
+                }
+            };
 
-            // TODO craft the response message
+            // Execute the queries using the physical plan
+            let res = query_engine.execute(logical_plan, physical_plan);
+            match res {
+                Ok(val) => {
+                    result = val;
+                }
+                Err(err) => result = format!("Exec error {:?}", err).into(),
+            }
         }
 
-        let result = [0 as u8];
-        let _ = socket.write(&result).await;
+        socket.write(&result).await.unwrap();
 
         Ok(())
     }
@@ -136,7 +153,8 @@ async fn get_query_from_request<'a>(
 
         count += bytes;
 
-        if buffer.as_slice()[(count - bytes)..count] == b"EOF\n".to_vec() {
+        //debug!("{:?}", from_utf8(buffer));
+        if buffer.as_slice()[(count - 4)..count] == b"EOF\n".to_vec() {
             break;
         }
     }

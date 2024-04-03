@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::Table;
 
 use crate::{
     catalog::{self, Column, ColumnType, NaadanCatalog, Session},
@@ -471,7 +470,7 @@ impl CatalogPage for Page {
             .unwrap();
 
         for column in &table.schema {
-            let is_null = (column.1.is_null as u16).shl(15) as u16;
+            let is_null = (column.1.is_nullable as u16).shl(15) as u16;
             let column_type = column.1.column_type.clone() as u8 as u16;
 
             buf_cursor
