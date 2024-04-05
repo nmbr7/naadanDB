@@ -1,4 +1,6 @@
+use log::debug;
 use serde::{Deserialize, Serialize};
+use sqlparser::ast::Values;
 
 use crate::{
     catalog::{self, Column, ColumnType, NaadanCatalog, Session},
@@ -7,7 +9,9 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
+    hash::Hash,
     io::{BufWriter, Bytes, Cursor, Read, Seek, Write},
+    iter::Enumerate,
     mem,
     ops::Shl,
     string,
@@ -15,6 +19,7 @@ use std::{
 
 const DB_DATAFILE: &str = "/tmp/DB_data_file.bin";
 const DB_TABLE_CATALOG_FILE: &str = "/tmp/DB_table_catalog_file.bin";
+const DB_TABLE_DATA_FILE: &str = "/tmp/DB_table_{table_id}_file.bin";
 
 #[derive(PartialEq, Eq)]
 enum WriteType {
@@ -23,10 +28,41 @@ enum WriteType {
     Delete,
 }
 
-pub trait StorageEngine: std::fmt::Debug {
-    fn get_table_details(&self, name: &String) -> Result<catalog::Table, bool>;
+use thiserror::Error;
 
-    fn add_table(&mut self, table: &catalog::Table) -> Result<(), bool>;
+#[derive(Error, Debug)]
+pub enum StorageEngineError {
+    #[error("Table not found")]
+    TableNotFound,
+    #[error("Adding new table failed")]
+    TableAddFailed,
+    #[error("Table already exists")]
+    TableAlreadyExists,
+    #[error("Adding new row to table failed")]
+    RowAddFailed,
+    #[error("Flusing page to disk failed")]
+    PageFlushFailed,
+    #[error("Unknown storage engine error")]
+    Unknown,
+}
+
+type RowIdType = usize;
+type TableIdType = usize;
+
+pub trait StorageEngine: std::fmt::Debug {
+    /// Get table details from the DB catalog
+    /// Will include table id and columns details
+    fn get_table_details(&self, name: &String) -> Result<catalog::Table, StorageEngineError>;
+
+    /// Add table into the DB catalog
+    fn add_table(&mut self, table: &mut catalog::Table) -> Result<TableIdType, StorageEngineError>;
+
+    /// Insert new row into a table
+    fn add_row_into_table(
+        &mut self,
+        row_values: Values,
+        table: &catalog::Table,
+    ) -> Result<RowIdType, StorageEngineError>;
 
     fn read_row(&mut self, row_id: usize) -> Result<&RowData, bool>;
 
@@ -39,13 +75,35 @@ pub trait StorageEngine: std::fmt::Debug {
     fn reset_memory(&mut self);
 }
 
-// Storage Engine implementation
+/// Storage Engine Metadata
+#[derive(Debug)]
+pub struct StorageEngineMetadata {
+    page_count: usize,
+    table_count: usize,
+}
+
+impl StorageEngineMetadata {
+    pub fn new(page_count: usize, table_count: usize) -> Self {
+        Self {
+            page_count,
+            table_count,
+        }
+    }
+}
+#[derive(Debug)]
+pub struct TableMetadata {
+    pub page_ids: Vec<usize>,
+    pub row_count: u32,
+}
+
+/// Storage Engine
 #[derive(Debug)]
 pub struct OurStorageEngine {
     catalog_page: HashMap<usize, Page>,
     buffer_pool: BufferPool,
     row_index: HashMap<usize, usize>,
-    engine_metadata_store: Vec<usize>,
+    table_index: HashMap<TableIdType, TableMetadata>,
+    engine_metadata: StorageEngineMetadata,
 }
 impl OurStorageEngine {
     pub fn init(page_count: usize) -> Self {
@@ -60,8 +118,9 @@ impl OurStorageEngine {
         Self {
             buffer_pool,
             row_index,
-            engine_metadata_store: vec![],
+            engine_metadata: StorageEngineMetadata::new(0, 0),
             catalog_page: HashMap::from([(1, catalog_page)]),
+            table_index: HashMap::new(),
         }
     }
 
@@ -146,16 +205,70 @@ impl OurStorageEngine {
 }
 
 impl StorageEngine for OurStorageEngine {
-    fn get_table_details(&self, name: &String) -> Result<catalog::Table, bool> {
+    fn get_table_details(&self, name: &String) -> Result<catalog::Table, StorageEngineError> {
         self.catalog_page.get(&1).unwrap().get_table_details(name)
     }
 
-    fn add_table(&mut self, table: &catalog::Table) -> Result<(), bool> {
+    fn add_table(&mut self, table: &mut catalog::Table) -> Result<TableIdType, StorageEngineError> {
         let catalog_page = self.catalog_page.get_mut(&1).unwrap();
-        catalog_page.write_table_details(table);
-        catalog_page.flush_catalog_page();
+        table.id = self.engine_metadata.table_count as u16 + 1;
+        self.engine_metadata.table_count += 1;
+        match catalog_page.write_table_details(table) {
+            Ok(_) => {}
+            Err(err) => return Err(err),
+        }
+        match catalog_page.flush_catalog_page() {
+            Ok(_) => {}
+            Err(err) => return Err(err),
+        }
 
-        Ok(())
+        Ok(10)
+    }
+
+    fn add_row_into_table(
+        &mut self,
+        row_values: Values,
+        table: &catalog::Table,
+    ) -> Result<RowIdType, StorageEngineError> {
+        let mut table_pages: Vec<usize> = vec![];
+        let mut page_id: usize;
+        let mut row_id: u32;
+
+        // debug!("Storage engine: {:?}", self);
+        let page: &mut Page = match self.table_index.get_mut(&(table.id as usize)) {
+            Some(val) => {
+                table_pages.append(&mut val.page_ids.clone());
+                page_id = table_pages.last().unwrap().clone();
+                // TODO: make these updated atomic
+                row_id = val.row_count + 1;
+                val.row_count += row_values.rows.len() as u32;
+                let page = self.buffer_pool.page_pool.get_mut(&page_id).unwrap();
+                // TODO: check if the page has enough space
+                page
+            }
+            None => {
+                page_id = self.engine_metadata.page_count + 1;
+                row_id = 1;
+                let page = Page::new_with_capacity(8 * 1024);
+                self.buffer_pool.page_pool.insert(page_id, page);
+                self.table_index.insert(
+                    table.id as usize,
+                    TableMetadata {
+                        page_ids: vec![page_id],
+                        row_count: row_values.rows.len() as u32,
+                    },
+                );
+                let page = self.buffer_pool.page_pool.get_mut(&page_id).unwrap();
+                page
+            }
+        };
+
+        page.write_table_row(row_id, row_values, table).unwrap();
+        page.flush(table.id as usize, page_id).unwrap();
+
+        //debug!("{:?}", page);
+
+        Ok(row_id as usize)
     }
 
     fn reset_memory(&mut self) {
@@ -232,6 +345,7 @@ pub struct PageHeader {
     extra: [u8; 4],
     offset: HashMap<Id, Offset>,
     last_offset: Offset,
+    last_var_len_offset: Offset,
     page_capacity: u32,
 }
 
@@ -250,12 +364,39 @@ pub struct RowData {
     pub data: Vec<u8>,
 }
 
+/// Read string from a byte slice (Format: |StringLen|StringBytes|)
+fn read_string_from_buf(
+    buf_cursor: &mut Cursor<&Vec<u8>>,
+    offset: u64,
+    reset_offset: bool,
+) -> String {
+    let mut len_buf = [0u8; 2];
+    let current_pos = buf_cursor.position();
+    buf_cursor.set_position(offset);
+
+    buf_cursor.read_exact(&mut len_buf).unwrap();
+
+    let len = u16::from_be_bytes(len_buf);
+
+    let mut data_buf = vec![0; len as usize];
+
+    buf_cursor.read_exact(&mut data_buf).unwrap();
+
+    let table_name = String::from_utf8(data_buf).unwrap();
+
+    if reset_offset {
+        buf_cursor.set_position(current_pos);
+    }
+
+    table_name
+}
+
 pub trait CatalogPage {
     //fn init();
 
-    fn get_table_details(&self, name: &String) -> Result<catalog::Table, bool>;
+    fn get_table_details(&self, name: &String) -> Result<catalog::Table, StorageEngineError>;
 
-    fn write_table_details(&mut self, table: &catalog::Table) -> Result<usize, bool>;
+    fn write_table_details(&mut self, table: &catalog::Table) -> Result<usize, StorageEngineError>;
 
     // fn get_db_details(&self, name: &String) -> Vec<u32>;
 
@@ -319,15 +460,11 @@ pub struct Page {
 }
 
 impl CatalogPage for Page {
-    // fn init() {
-    //     todo!()
-    // }
-
-    fn get_table_details(&self, name: &String) -> Result<catalog::Table, bool> {
+    fn get_table_details(&self, name: &String) -> Result<catalog::Table, StorageEngineError> {
         let split_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
         let data = match self.data.contains_key(&0) {
             true => self.data.get(&0).unwrap(),
-            false => return Err(false),
+            false => return Err(StorageEngineError::TableNotFound),
         };
         let mut buf_cursor = Cursor::new(&data.data);
 
@@ -341,7 +478,7 @@ impl CatalogPage for Page {
 
         while table_name != *name && buf_cursor.position() < split_offset {
             if table_name.is_empty() {
-                return Err(false);
+                return Err(StorageEngineError::TableNotFound);
             }
             buf_cursor.set_position(buf_cursor.position() + 10);
             buf_cursor.read_exact(&mut offset_buf).unwrap();
@@ -382,13 +519,10 @@ impl CatalogPage for Page {
 
             return Ok(table);
         }
-
-        println!("Table 1 : {:?}", table_name);
-
-        Err(false)
+        Err(StorageEngineError::TableNotFound)
     }
 
-    fn write_table_details(&mut self, table: &catalog::Table) -> Result<usize, bool> {
+    fn write_table_details(&mut self, table: &catalog::Table) -> Result<usize, StorageEngineError> {
         let split_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
         let data = match self.data.contains_key(&0) {
             true => self.data.get_mut(&0).unwrap(),
@@ -407,6 +541,7 @@ impl CatalogPage for Page {
 
         let mut buf_cursor = Cursor::new(&mut data.data);
         let mut cursor_base = 0 as u64;
+
         match self.header.offset.get(&0) {
             Some(&val) => {
                 cursor_base = val as u64;
@@ -432,7 +567,7 @@ impl CatalogPage for Page {
                 >= self.header.page_capacity as u64
         {
             println!("Buffer full cursor at {}", cursor_base);
-            return Err(false);
+            return Err(StorageEngineError::TableAddFailed);
         }
 
         let offset = dyn_cursor_base.to_be_bytes();
@@ -499,32 +634,6 @@ impl CatalogPage for Page {
     }
 }
 
-fn read_string_from_buf(
-    buf_cursor: &mut Cursor<&Vec<u8>>,
-    offset: u64,
-    reset_offset: bool,
-) -> String {
-    let mut len_buf = [0u8; 2];
-    let current_pos = buf_cursor.position();
-    buf_cursor.set_position(offset);
-
-    buf_cursor.read_exact(&mut len_buf).unwrap();
-
-    let len = u16::from_be_bytes(len_buf);
-
-    let mut data_buf = vec![0; len as usize];
-
-    buf_cursor.read_exact(&mut data_buf).unwrap();
-
-    let table_name = String::from_utf8(data_buf).unwrap();
-
-    if reset_offset {
-        buf_cursor.set_position(current_pos);
-    }
-
-    table_name
-}
-
 impl Page {
     pub fn new() -> Self {
         Self::new_with_capacity(4 * 1024)
@@ -532,9 +641,10 @@ impl Page {
     pub fn new_with_capacity(capacity: u32) -> Self {
         let page_header = PageHeader {
             extra: [0; 4],
-            checksum: ['X' as u8, 'X' as u8, 'X' as u8, 'X' as u8],
-            offset: HashMap::from([('O' as u8 as u32, 'O' as u8 as u32)]),
+            checksum: [0; 4],
+            offset: HashMap::new(),
             last_offset: 0,
+            last_var_len_offset: 0,
             page_capacity: capacity,
         };
 
@@ -544,8 +654,65 @@ impl Page {
         }
     }
 
-    pub fn flush(&self) -> Result<(), u32> {
+    pub fn flush(&self, table_id: usize, expected_page_id: usize) -> Result<(), u32> {
         log(format!("Flushing Data: {:?} to disk.", self));
+        let table_data_file =
+            String::from(DB_TABLE_DATA_FILE).replace("{table_id}", table_id.to_string().as_str());
+
+        match File::options()
+            .read(true)
+            .write(true)
+            .open(table_data_file.clone())
+        {
+            Ok(mut file) => {
+                let mut buf = vec![0u8; 8 * 1024];
+                match file.read_exact(&mut buf) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        file.read(&mut buf).unwrap();
+                    }
+                }
+
+                let mut buf_cursor = Cursor::new(buf);
+
+                let mut count = 1;
+
+                loop {
+                    let mut offset_buf = [0u8; 8];
+                    buf_cursor.read_exact(&mut offset_buf).unwrap();
+                    let page_id = u64::from_be_bytes(offset_buf);
+                    if page_id == 0 {
+                        break;
+                    } else if page_id == expected_page_id as u64 {
+                        break;
+                    }
+                    count += 1;
+                }
+
+                file.seek(std::io::SeekFrom::Start(count * 8 * 1024))
+                    .unwrap();
+                let write_bytes = bincode::serialize(&self).unwrap();
+                file.write_all(write_bytes.as_slice()).unwrap();
+                file.flush().unwrap();
+
+                return Ok(());
+            }
+            Err(_) => {
+                let mut file = File::options()
+                    .create(true)
+                    .write(true)
+                    .open(table_data_file)
+                    .unwrap();
+
+                file.seek(std::io::SeekFrom::Start(8 * 1024)).unwrap();
+                let write_bytes = bincode::serialize(&self).unwrap();
+                file.write_all(write_bytes.as_slice()).unwrap();
+                file.flush().unwrap();
+
+                return Ok(());
+            }
+        }
+
         Ok(())
     }
 
@@ -560,6 +727,93 @@ impl Page {
         log(format!("{:?}", res));
 
         Ok(res)
+    }
+
+    pub fn write_table_row(
+        &mut self,
+        mut row_id: u32,
+        row_data: Values,
+        table: &catalog::Table,
+    ) -> Result<usize, bool> {
+        log(format!("Writing row {} to page", row_id));
+        // TODO: If there are no variable length attribute in the schema,
+        //       then remove the dynamic sized buffer space.
+        let var_len_buf_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
+
+        //debug!("Page Data {:?}", self.data);
+        let data = match self.data.contains_key(&0) {
+            true => self.data.get_mut(&0).unwrap(),
+            false => {
+                self.data.insert(
+                    0,
+                    RowData {
+                        offset: HashMap::new(),
+                        data: vec![],
+                    },
+                );
+
+                self.data.get_mut(&0).unwrap()
+            }
+        };
+
+        let mut buf_cursor = Cursor::new(&mut data.data);
+
+        let mut dyn_cursor_base: u64 = self.header.last_var_len_offset as u64;
+
+        if dyn_cursor_base < var_len_buf_offset {
+            dyn_cursor_base = var_len_buf_offset;
+        }
+
+        buf_cursor.set_position(self.header.last_offset as u64);
+
+        // TODO: check the available space
+        for row in row_data.rows {
+            for (index, column) in row.iter().enumerate() {
+                data.offset
+                    .insert(index as u32, buf_cursor.position() as u32);
+                match column {
+                    sqlparser::ast::Expr::Value(value) => match value {
+                        sqlparser::ast::Value::Number(val, _) => {
+                            let number = val.parse::<i32>().unwrap();
+                            buf_cursor.write_all(&number.to_be_bytes()).unwrap();
+                        }
+                        sqlparser::ast::Value::SingleQuotedString(val) => {
+                            write_string(&mut dyn_cursor_base, &mut buf_cursor, val);
+                        }
+                        sqlparser::ast::Value::DoubleQuotedString(val) => {
+                            write_string(&mut dyn_cursor_base, &mut buf_cursor, val);
+                        }
+                        sqlparser::ast::Value::Boolean(val) => {
+                            let b_val: &[u8] = match val {
+                                true => &[0b1],
+                                false => &[0b0],
+                            };
+
+                            buf_cursor.write_all(b_val).unwrap();
+                        }
+                        sqlparser::ast::Value::Null => {
+                            // Null is set a 8 bytes for now, need to be allocated based
+                            // on the schema and column index in the input row
+                            buf_cursor.write_all(&(0 as u64).to_be_bytes()).unwrap();
+                        }
+                        _ => {}
+                    },
+                    _ => {
+                        debug!("Table insert source is not explicit values.");
+                        return Err(false);
+                    }
+                }
+            }
+            debug!("Done inserting row {}", row_id);
+            self.header
+                .offset
+                .insert(row_id as u32, self.header.last_offset as u32);
+            self.header.last_offset = buf_cursor.position() as u32;
+            self.header.last_var_len_offset = dyn_cursor_base as u32;
+            row_id += 1;
+        }
+
+        Ok(200)
     }
 
     pub fn write_row(&mut self, row_id: &usize, row_data: RowData) -> Result<usize, usize> {
@@ -591,15 +845,18 @@ impl Page {
         Ok(page)
     }
 
-    pub fn flush_catalog_page(&self) -> Result<(), bool> {
+    pub fn flush_catalog_page(&self) -> Result<(), StorageEngineError> {
         match File::options().write(true).open(DB_TABLE_CATALOG_FILE) {
             Ok(mut file) => {
                 let write_bytes = bincode::serialize(&self).unwrap();
-                file.write_all(write_bytes.as_slice()).unwrap();
+                match file.write_all(write_bytes.as_slice()) {
+                    Ok(_) => {}
+                    Err(err) => return Err(StorageEngineError::PageFlushFailed),
+                }
 
                 Ok(())
             }
-            Err(_) => Err(false),
+            Err(err) => return Err(StorageEngineError::PageFlushFailed),
         }
     }
 
@@ -667,6 +924,30 @@ impl Page {
 
         Ok(())
     }
+}
+
+fn write_string(
+    dyn_cursor_base: &mut u64,
+    buf_cursor: &mut Cursor<&mut Vec<u8>>,
+    str_val: &String,
+) {
+    let offset = dyn_cursor_base.to_be_bytes();
+
+    buf_cursor.write_all(&offset).unwrap();
+    let current_pos = buf_cursor.position();
+
+    // Seek to table column list id offset start location at 1024 * 2 bytes
+    buf_cursor.set_position(*dyn_cursor_base as u64);
+
+    // write table name length (max is 128) in 2 byte
+    buf_cursor
+        .write_all(&(str_val.len() as u16).to_be_bytes())
+        .unwrap();
+
+    // Write table name (max len is 128)
+    buf_cursor.write_all(str_val.as_bytes()).unwrap();
+    buf_cursor.set_position(current_pos);
+    *dyn_cursor_base += str_val.len() as u64 + 2;
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Default)]

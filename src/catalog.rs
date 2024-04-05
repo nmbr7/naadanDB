@@ -1,6 +1,5 @@
 use core::panic;
 use std::collections::{HashMap, HashSet};
-
 use sqlparser::ast::DataType;
 
 #[derive(Debug, Default)]

@@ -74,6 +74,49 @@ impl NaadanParser {
     }
 }
 
+fn insert_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
+    debug!("insert into table");
+    let mut error = false;
+    let mut invalid_type = false;
+
+    match physical_plan {
+        PhysicalPlanExpr::Relational(val) => match val {
+            RelationalExprType::InsertExpr(expr) => {
+                {
+                    let mut storage_instance = task::block_in_place(|| {
+                        println!("Locking storage_instance {:?}", SystemTime::now());
+                        exec_context.get_storage_engine().unwrap().blocking_lock()
+                        // do some compute-heavy work or call synchronous code
+                    });
+
+                    match storage_instance.get_table_details(&expr.table_name) {
+                        Ok(val) => {
+                            // TODO check row constraints, and procceed only if there are no conflict.
+                            debug!("Inserting into Table '{}'", &expr.table_name);
+                            storage_instance
+                                .add_row_into_table(expr.columns, &val)
+                                .unwrap();
+                            error = false;
+                        }
+                        Err(_) => error = false,
+                    }
+                }
+            }
+            _ => invalid_type = true,
+        },
+        _ => invalid_type = true,
+    }
+
+    if error {
+        exec_context.last_op_status = Some(false);
+        if invalid_type {
+            error!("Create table with wrong expr type ");
+        }
+    } else {
+        exec_context.last_op_status = Some(true);
+    }
+}
+
 fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
     debug!("creating table");
 
@@ -83,7 +126,7 @@ fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr)
     match physical_plan {
         PhysicalPlanExpr::Relational(val) => match val {
             RelationalExprType::CreateTableExpr(expr) => {
-                let table = catalog::Table {
+                let mut table = catalog::Table {
                     name: expr.table_name,
                     schema: expr.columns,
                     indexes: HashSet::new(),
@@ -102,7 +145,7 @@ fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr)
                             error = true;
                         }
                         Err(_) => {
-                            storage_instance.add_table(&table).unwrap();
+                            storage_instance.add_table(&mut table).unwrap();
                         }
                     }
                 }
@@ -146,7 +189,6 @@ impl NaadanQueryEngine {
         match logical_plan.last() {
             Some(plan) => {
                 let root_exp = plan.plan_expr_root.as_ref().unwrap().borrow();
-                //   let ty = exp.borrow();
                 match &*root_exp {
                     PlanExpr::Relational(val) => match &val.rel_type {
                         RelationalExprType::ScanExpr(val) => {
@@ -169,7 +211,16 @@ impl NaadanQueryEngine {
 
                             exec_vec.push(physical_plan);
                         }
-                        RelationalExprType::InsertExpr(_) => todo!(),
+                        RelationalExprType::InsertExpr(val) => {
+                            let physical_plan_expr: PhysicalPlanExpr<'a> =
+                                PhysicalPlanExpr::Relational(RelationalExprType::InsertExpr(
+                                    val.clone(),
+                                ));
+                            let physical_plan: PhysicalPlan<'a> =
+                                PhysicalPlan::new(physical_plan_expr, insert_table);
+
+                            exec_vec.push(physical_plan);
+                        }
                         RelationalExprType::InnerJoinExpr(_, _, _) => todo!(),
                         RelationalExprType::FilterExpr(_) => todo!(),
                         RelationalExprType::IndexScanExpr { index_id: _ } => todo!(),
@@ -193,7 +244,7 @@ impl NaadanQueryEngine {
         // Iterate through the AST and create best logical plan which potentially has the least f execution
 
         // TODO: Read from the DB catalog to get info about the the table (table name id, row count, columns etc..)
-        // based on the info from the catalog info, validate the query.
+        //       based on the info from the catalog info, validate the query.
         for statement in query.ast.iter() {
             let mut plan: Plan = Plan {
                 plan_stats: Some(Stats {
@@ -287,26 +338,52 @@ impl NaadanQueryEngine {
                 Statement::AlterTable { .. } => {}
 
                 Statement::Insert {
-                    or,
-                    ignore,
-                    into,
                     table_name,
-                    table_alias,
                     columns,
-                    overwrite,
                     source,
-                    partitioned,
-                    after_columns,
-                    table,
-                    on,
-                    returning,
-                    replace_into,
-                    priority,
+                    ..
                 } => {
                     debug!(
                         "Insert statement, table name is {} with columns {:?} and values {:?}",
                         table_name, columns, source
-                    )
+                    );
+                    let t_name = table_name.0.last().unwrap().value.clone();
+
+                    {
+                        let storage_instance = task::block_in_place(move || {
+                            println!("Locking storage_instance {:?}", SystemTime::now());
+                            self.storage_engine.blocking_lock()
+                            // do some compute-heavy work or call synchronous code
+                        });
+
+                        match storage_instance.get_table_details(&t_name) {
+                            Ok(table_catalog) => {
+                                // TODO: validate the input columns againt the schema
+                                let row_values = match &*(source.as_ref().unwrap().body) {
+                                    SetExpr::Values(val) => val.clone(),
+                                    _ => return Err(false),
+                                };
+
+                                // Create plan
+                                let local_plan = PlanExpr::Relational(Relational {
+                                    rel_type: RelationalExprType::InsertExpr(
+                                        crate::plan::InsertExpr {
+                                            table_name: t_name,
+                                            columns: row_values,
+                                        },
+                                    ),
+                                    group: None,
+                                    stats: None,
+                                });
+
+                                plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+                            }
+                            Err(_) => {
+                                debug!(" Invalid Table {}", table_name);
+                                return Err(false);
+                            }
+                        }
+                    }
                 }
                 Statement::Update { .. } => {}
                 Statement::Delete { .. } => {}
@@ -501,7 +578,7 @@ impl NaadanQueryEngine {
 
         let elapsed_time = now.elapsed();
 
-        if exec_context.last_op_status.unwrap() {
+        if exec_context.last_op_status.unwrap_or(true) {
             Ok(format!(
                 "Plan executed success in {:.3}ms",
                 elapsed_time.as_micros() as f64 / 1000.0
