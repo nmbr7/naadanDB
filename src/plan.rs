@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use sqlparser::ast::{Value, Values};
 use tokio::sync::Mutex;
 
 use crate::{catalog::Column, query_engine::ExecContext, storage_engine::StorageEngine};
@@ -34,7 +35,7 @@ pub struct CreateTableExpr {
 #[derive(Debug, Clone)]
 pub struct InsertExpr {
     pub table_name: String,
-    pub columns: HashMap<String, String>,
+    pub columns: Values,
 }
 
 #[derive(Debug, Clone)]
