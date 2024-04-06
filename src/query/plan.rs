@@ -9,7 +9,9 @@ use std::{
 use sqlparser::ast::{Value, Values};
 use tokio::sync::Mutex;
 
-use crate::{catalog::Column, query_engine::ExecContext, storage_engine::StorageEngine};
+use crate::storage::catalog::Column;
+
+use super::query_engine::ExecContext;
 
 pub type Edge<T> = Rc<RefCell<T>>;
 type WeakEdge<T> = Weak<RefCell<T>>;

@@ -1,6 +1,6 @@
 use core::panic;
-use std::collections::{HashMap, HashSet};
 use sqlparser::ast::DataType;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default)]
 pub struct Database {
