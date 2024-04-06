@@ -1,7 +1,4 @@
-use std::{
-    io::{BufRead, BufReader},
-    str::from_utf8,
-};
+use std::str::from_utf8;
 
 use log::{debug, error, info, trace};
 use rand::Rng;
@@ -14,10 +11,8 @@ use tokio::{
 use std::sync::Arc;
 
 use crate::{
-    catalog::NaadanCatalog,
-    query_engine::{self, NaadanQuery, NaadanQueryEngine},
-    server,
-    storage_engine::{self, OurStorageEngine, RowData, StorageEngine},
+    query::{query_engine::NaadanQueryEngine, NaadanQuery},
+    storage::{storage_engine::NaadanStorageEngine, StorageEngine},
 };
 
 #[derive(Debug)]
@@ -35,7 +30,7 @@ impl NaadanServer {
     pub fn setup(server_config: ServerConfig) -> Self {
         NaadanServer {
             config: server_config,
-            storage_engine: Arc::new(Mutex::new(Box::new(OurStorageEngine::init(1024)))),
+            storage_engine: Arc::new(Mutex::new(Box::new(NaadanStorageEngine::init(1024)))),
         }
     }
 

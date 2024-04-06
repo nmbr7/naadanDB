@@ -1,23 +1,20 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::catalog::{self, Column, ColumnType};
-use crate::plan::{
-    Edge, PhysicalPlan, PhysicalPlanExpr, Plan, PlanExecFn, PlanExpr, PlanGroup, Relational,
-    RelationalExprType, Scalar, ScalarExprType, ScanExpr, Stats,
-};
-use crate::storage_engine::StorageEngine;
+use crate::query::plan::*;
+use crate::storage::catalog::{self, Column, ColumnType};
+use crate::storage::StorageEngine;
 
 use log::{debug, error};
 use sqlparser::ast::{SetExpr, Statement, TableFactor};
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::{Parser, ParserError};
+
 use tokio::sync::Mutex;
 use tokio::task;
+
+use super::NaadanQuery;
 
 pub struct ExecContext {
     last_result: Option<Vec<u8>>,
@@ -51,26 +48,6 @@ impl ExecContext {
     }
     pub fn get_storage_engine(&mut self) -> Option<&Arc<Mutex<Box<dyn StorageEngine + Send>>>> {
         self.storage_engine.as_ref()
-    }
-}
-
-pub struct NaadanParser;
-impl NaadanParser {
-    pub fn parse(query: &str) -> Result<Vec<Statement>, ParserError> {
-        debug!(
-            "\n ==============\nParsing query {:?} Started\n ==============",
-            query
-        );
-
-        let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
-        let ast = Parser::parse_sql(&dialect, query)?;
-
-        debug!("Parsed AST is {:?}\n", ast);
-        debug!(
-            "\n ==============\nParsing query {:?} Finished\n ==============",
-            query
-        );
-        Ok(ast)
     }
 }
 
@@ -283,29 +260,14 @@ impl NaadanQueryEngine {
                                 }
                                 sqlparser::ast::ColumnOption::NotNull => todo!(),
                                 sqlparser::ast::ColumnOption::Default(_) => todo!(),
-                                sqlparser::ast::ColumnOption::Unique {
-                                    is_primary,
-                                    characteristics,
-                                } => todo!(),
-                                sqlparser::ast::ColumnOption::ForeignKey {
-                                    foreign_table,
-                                    referred_columns,
-                                    on_delete,
-                                    on_update,
-                                    characteristics,
-                                } => todo!(),
+                                sqlparser::ast::ColumnOption::Unique { .. } => todo!(),
+                                sqlparser::ast::ColumnOption::ForeignKey { .. } => todo!(),
                                 sqlparser::ast::ColumnOption::Check(_) => todo!(),
                                 sqlparser::ast::ColumnOption::DialectSpecific(_) => todo!(),
                                 sqlparser::ast::ColumnOption::CharacterSet(_) => todo!(),
                                 sqlparser::ast::ColumnOption::Comment(_) => todo!(),
                                 sqlparser::ast::ColumnOption::OnUpdate(_) => todo!(),
-                                sqlparser::ast::ColumnOption::Generated {
-                                    generated_as,
-                                    sequence_options,
-                                    generation_expr,
-                                    generation_expr_mode,
-                                    generated_keyword,
-                                } => todo!(),
+                                sqlparser::ast::ColumnOption::Generated { .. } => todo!(),
                                 sqlparser::ast::ColumnOption::Options(_) => todo!(),
                             }
                         }
@@ -323,12 +285,10 @@ impl NaadanQueryEngine {
 
                     // Create plan
                     let local_plan = PlanExpr::Relational(Relational {
-                        rel_type: RelationalExprType::CreateTableExpr(
-                            crate::plan::CreateTableExpr {
-                                table_name: table_name,
-                                columns: column_map,
-                            },
-                        ),
+                        rel_type: RelationalExprType::CreateTableExpr(CreateTableExpr {
+                            table_name: table_name,
+                            columns: column_map,
+                        }),
                         group: None,
                         stats: None,
                     });
@@ -366,12 +326,10 @@ impl NaadanQueryEngine {
 
                                 // Create plan
                                 let local_plan = PlanExpr::Relational(Relational {
-                                    rel_type: RelationalExprType::InsertExpr(
-                                        crate::plan::InsertExpr {
-                                            table_name: t_name,
-                                            columns: row_values,
-                                        },
-                                    ),
+                                    rel_type: RelationalExprType::InsertExpr(InsertExpr {
+                                        table_name: t_name,
+                                        columns: row_values,
+                                    }),
                                     group: None,
                                     stats: None,
                                 });
@@ -587,47 +545,5 @@ impl NaadanQueryEngine {
         } else {
             Err(false)
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct NaadanQuery {
-    pub query_string: String,
-    _params: Vec<String>,
-    pub ast: Vec<Statement>,
-}
-
-impl NaadanQuery {
-    pub fn init(query: String) -> Result<Self, ParserError> {
-        match NaadanParser::parse(&query) {
-            Ok(ast) => Ok(Self {
-                query_string: query.clone(),
-                _params: vec![],
-                ast: ast,
-            }),
-            Err(err) => return Err(err),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn Test_Parser() {
-        let sql = "SELECT a, b, 123, myfunc(b) \
-                   FROM table_1 \
-                   WHERE a > b AND b < 100 \
-                   ORDER BY a DESC, b";
-
-        let ast = NaadanParser::parse(sql);
-
-        let sql = "SELECT distinct 2 as w, a, b \
-                   FROM table_2 \
-                   WHERE a > 100 \
-                   ORDER BY b";
-
-        let ast = NaadanParser::parse(sql);
     }
 }
