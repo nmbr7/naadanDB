@@ -1,18 +1,18 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs::File,
-    io::{Cursor, Read, Seek, Write},
-    ops::Shl,
-};
-
-use log::debug;
-use serde::{Deserialize, Serialize};
-use sqlparser::ast::Values;
-
 use super::{
     catalog::{Column, ColumnType, Table},
     utils::read_string_from_buf,
-    StorageEngineError,
+    NaadanError,
+};
+use log::debug;
+use serde::{Deserialize, Serialize};
+use sqlparser::ast::{Expr, Values};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::{Cursor, Read, Seek, Write},
+    ops::{Shl, Shr},
+    vec,
 };
 
 use crate::{helper::log, storage::utils::write_string_to_buf};
@@ -24,6 +24,18 @@ const DB_TABLE_DATA_FILE: &str = "/tmp/DB_table_{table_id}_file.bin";
 pub(crate) type Id = u32;
 pub(crate) type Offset = u32;
 
+pub trait CatalogPage {
+    fn table_count(&self) -> Result<u32, NaadanError>;
+
+    fn get_table_details(&self, name: &String) -> Result<Table, NaadanError>;
+
+    fn write_table_details(&mut self, table: &Table) -> Result<usize, NaadanError>;
+
+    // fn get_db_details(&self, name: &String) -> Vec<u32>;
+
+    // fn get_db_names() -> Vec<String>;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageHeader {
     pub(crate) checksum: [u8; 4],
@@ -34,7 +46,7 @@ pub struct PageHeader {
     pub(crate) page_capacity: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RowData {
     /// Provides the offset to the values inside data field.
     ///
@@ -47,18 +59,6 @@ pub struct RowData {
     /// will have dynamic values based on the table schema and other details,
     ///
     pub data: Vec<u8>,
-}
-
-pub trait CatalogPage {
-    //fn init();
-
-    fn get_table_details(&self, name: &String) -> Result<Table, StorageEngineError>;
-
-    fn write_table_details(&mut self, table: &Table) -> Result<usize, StorageEngineError>;
-
-    // fn get_db_details(&self, name: &String) -> Vec<u32>;
-
-    // fn get_db_names() -> Vec<String>;
 }
 
 /// ```
@@ -98,13 +98,13 @@ pub trait CatalogPage {
 /// |------------------------------------------------------|
 /// | <---------------- Table-Section -------------------->|
 /// |------------------------------------------------------|
-/// ||T-Name|T-ID|T-Column-List-Offset|| ..................|
+/// |TCount||T-Name offset|T-ID|T-Column-List-Offset|| ....|
 /// |------------------------------------------------------|
 /// |........2KB...........||T-Name|T-ID|T-Row-List-Offset||     
 /// |------------------------------------------------------|
-/// |<--------- Dynamic T-Column-List-Offset ------------->|
+/// |<---------------- Dynamic Sized Section ------------->|
 /// |------------------------------------------------------|
-/// ||T1_Col_count|16it Col1-Type|Col1-Name| ..............|                              
+/// ||TName||T1_Col_count|16it Col1-Type|Col1-Name| .......|                              
 /// |------------------------------------------------------|
 /// |......|16it Col{T1_C_count}-Type|Col{T1_C_count}-Name||
 /// |------------------------------------------------------|
@@ -114,17 +114,29 @@ pub trait CatalogPage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Page {
     pub header: PageHeader,
-    pub data: HashMap<u32, RowData>,
+    pub data: RowData,
 }
 
 impl CatalogPage for Page {
-    fn get_table_details(&self, name: &String) -> Result<Table, StorageEngineError> {
-        let split_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
-        let data = match self.data.contains_key(&0) {
-            true => self.data.get(&0).unwrap(),
-            false => return Err(StorageEngineError::TableNotFound),
-        };
+    fn table_count(&self) -> Result<u32, NaadanError> {
+        let data = &self.data;
         let mut buf_cursor = Cursor::new(&data.data);
+
+        let mut table_count_buf = [0u8; 4];
+        buf_cursor.read_exact(&mut table_count_buf).unwrap();
+
+        let table_count = u32::from_be_bytes(table_count_buf);
+
+        Ok(table_count)
+    }
+
+    fn get_table_details(&self, name: &String) -> Result<Table, NaadanError> {
+        let split_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
+        let data = &self.data;
+        let mut buf_cursor = Cursor::new(&data.data);
+
+        let mut table_count_buf = [0u8; 4];
+        let table_count = buf_cursor.read_exact(&mut table_count_buf).unwrap();
 
         let mut offset_buf = [0u8; 8];
         let mut len_buf = [0u8; 2];
@@ -136,7 +148,7 @@ impl CatalogPage for Page {
 
         while table_name != *name && buf_cursor.position() < split_offset {
             if table_name.is_empty() {
-                return Err(StorageEngineError::TableNotFound);
+                return Err(NaadanError::TableNotFound);
             }
             buf_cursor.set_position(buf_cursor.position() + 10);
             buf_cursor.read_exact(&mut offset_buf).unwrap();
@@ -166,39 +178,40 @@ impl CatalogPage for Page {
             for _ in 0..len {
                 buf_cursor.read_exact(&mut data_buf).unwrap();
                 let c_type = u16::from_be_bytes(data_buf);
+
+                buf_cursor.read_exact(&mut offset_buf).unwrap();
+                let col_offset = u64::from_be_bytes(offset_buf);
+
                 let current_pos = buf_cursor.position();
                 let c_name = read_string_from_buf(&mut buf_cursor, current_pos, false);
 
                 table.schema.insert(
                     c_name,
-                    Column::new(ColumnType::from_bytes((c_type & 0x7fff) as u8), false),
+                    Column::new(
+                        ColumnType::from_bytes((c_type & 0x7fff) as u8),
+                        col_offset,
+                        false,
+                    ),
                 );
             }
 
             return Ok(table);
         }
-        Err(StorageEngineError::TableNotFound)
+        Err(NaadanError::TableNotFound)
     }
 
-    fn write_table_details(&mut self, table: &Table) -> Result<usize, StorageEngineError> {
+    fn write_table_details(&mut self, table: &Table) -> Result<usize, NaadanError> {
+        debug!("Creating new table with details {:?}", table);
         let split_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
-        let data = match self.data.contains_key(&0) {
-            true => self.data.get_mut(&0).unwrap(),
-            false => {
-                self.data.insert(
-                    0,
-                    RowData {
-                        offset: HashMap::new(),
-                        data: vec![],
-                    },
-                );
-
-                self.data.get_mut(&0).unwrap()
-            }
-        };
+        let data = &mut self.data;
 
         let mut buf_cursor = Cursor::new(&mut data.data);
-        let mut cursor_base = 0 as u64;
+
+        let table_count = table.id as u32;
+        // Write table count
+        buf_cursor.write_all(&table_count.to_be_bytes()).unwrap();
+
+        let mut cursor_base = 4 as u64;
 
         match self.header.offset.get(&0) {
             Some(&val) => {
@@ -225,7 +238,7 @@ impl CatalogPage for Page {
                 >= self.header.page_capacity as u64
         {
             println!("Buffer full cursor at {}", cursor_base);
-            return Err(StorageEngineError::TableAddFailed);
+            return Err(NaadanError::TableAddFailed);
         }
 
         let offset = dyn_cursor_base.to_be_bytes();
@@ -281,6 +294,10 @@ impl CatalogPage for Page {
                 .unwrap();
 
             buf_cursor
+                .write_all(&(column.1.offset as u64).to_be_bytes())
+                .unwrap();
+
+            buf_cursor
                 .write_all(&(column.0.len() as u16).to_be_bytes())
                 .unwrap();
             buf_cursor.write_all(column.0.as_bytes()).unwrap();
@@ -296,6 +313,7 @@ impl Page {
     pub fn new() -> Self {
         Self::new_with_capacity(4 * 1024)
     }
+
     pub fn new_with_capacity(capacity: u32) -> Self {
         let page_header = PageHeader {
             extra: [0; 4],
@@ -308,83 +326,8 @@ impl Page {
 
         Self {
             header: page_header,
-            data: HashMap::new(),
+            data: RowData::default(),
         }
-    }
-
-    pub fn flush(&self, table_id: usize, expected_page_id: usize) -> Result<(), u32> {
-        log(format!("Flushing Data: {:?} to disk.", self));
-        let table_data_file =
-            String::from(DB_TABLE_DATA_FILE).replace("{table_id}", table_id.to_string().as_str());
-
-        match File::options()
-            .read(true)
-            .write(true)
-            .open(table_data_file.clone())
-        {
-            Ok(mut file) => {
-                let mut buf = vec![0u8; 8 * 1024];
-                match file.read_exact(&mut buf) {
-                    Ok(_) => {}
-                    Err(_) => {
-                        file.read(&mut buf).unwrap();
-                    }
-                }
-
-                let mut buf_cursor = Cursor::new(buf);
-
-                let mut count = 1;
-
-                loop {
-                    let mut offset_buf = [0u8; 8];
-                    buf_cursor.read_exact(&mut offset_buf).unwrap();
-                    let page_id = u64::from_be_bytes(offset_buf);
-                    if page_id == 0 {
-                        break;
-                    } else if page_id == expected_page_id as u64 {
-                        break;
-                    }
-                    count += 1;
-                }
-
-                file.seek(std::io::SeekFrom::Start(count * 8 * 1024))
-                    .unwrap();
-                let write_bytes = bincode::serialize(&self).unwrap();
-                file.write_all(write_bytes.as_slice()).unwrap();
-                file.flush().unwrap();
-
-                return Ok(());
-            }
-            Err(_) => {
-                let mut file = File::options()
-                    .create(true)
-                    .write(true)
-                    .open(table_data_file)
-                    .unwrap();
-
-                file.seek(std::io::SeekFrom::Start(8 * 1024)).unwrap();
-                let write_bytes = bincode::serialize(&self).unwrap();
-                file.write_all(write_bytes.as_slice()).unwrap();
-                file.flush().unwrap();
-
-                return Ok(());
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn read_row(&self, row_id: &usize) -> Result<&RowData, bool> {
-        log(format!("Read row {} from page", row_id));
-        log(format!("{:?}", self));
-        let row_offset = self.header.offset.get(&(*row_id as u32)).unwrap();
-
-        log(format!("{}", row_offset));
-        let res = self.data.get(row_offset).unwrap();
-
-        log(format!("{:?}", res));
-
-        Ok(res)
     }
 
     pub fn write_table_row(
@@ -392,27 +335,14 @@ impl Page {
         mut row_id: u32,
         row_data: Values,
         table: &Table,
-    ) -> Result<usize, bool> {
+    ) -> Result<usize, NaadanError> {
         log(format!("Writing row {} to page", row_id));
         // TODO: If there are no variable length attribute in the schema,
         //       then remove the dynamic sized buffer space.
         let var_len_buf_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
 
         //debug!("Page Data {:?}", self.data);
-        let data = match self.data.contains_key(&0) {
-            true => self.data.get_mut(&0).unwrap(),
-            false => {
-                self.data.insert(
-                    0,
-                    RowData {
-                        offset: HashMap::new(),
-                        data: vec![],
-                    },
-                );
-
-                self.data.get_mut(&0).unwrap()
-            }
-        };
+        let data = &mut self.data;
 
         let mut buf_cursor = Cursor::new(&mut data.data);
 
@@ -458,7 +388,7 @@ impl Page {
                     },
                     _ => {
                         debug!("Table insert source is not explicit values.");
-                        return Err(false);
+                        return Err(NaadanError::RowAddFailed);
                     }
                 }
             }
@@ -474,51 +404,162 @@ impl Page {
         Ok(200)
     }
 
-    pub fn write_row(&mut self, row_id: &usize, row_data: RowData) -> Result<usize, usize> {
-        log(format!("Writing row {} to page", row_id));
+    pub fn read_table_row(&self, row_id: &usize, table: &Table) -> Result<Values, NaadanError> {
+        log(format!("Read row {} from page", row_id));
+        let row_offset = self.header.offset.get(&(*row_id as u32)).unwrap();
 
-        self.header.offset.insert(*row_id as u32, *row_id as u32);
-        //log(format!("RowIndex {:?}", self.header.offset));
-        self.data.insert(*row_id as u32, row_data);
+        let data = &self.data;
+        let mut buf_cursor = Cursor::new(&data.data);
+        buf_cursor.set_position(*row_offset as u64);
 
-        Ok(200)
+        let mut row_collection: Values = Values {
+            explicit_row: true,
+            rows: vec![],
+        };
+        let mut row: Vec<(String, Expr)> = vec![];
+        for (c_name, c_type) in &table.schema {
+            buf_cursor.set_position((*row_offset as u64) + (c_type.offset as u64));
+            match c_type.column_type {
+                ColumnType::UnSupported => {}
+                ColumnType::Int => {
+                    let mut buf = [0u8; 4];
+                    buf_cursor.read_exact(&mut buf).unwrap();
+                    let number = i32::from_be_bytes(buf);
+
+                    row.push((
+                        c_name.to_string(),
+                        Expr::Value(sqlparser::ast::Value::Number(
+                            number.to_string(),
+                            c_type.is_nullable,
+                        )),
+                    ))
+                }
+                ColumnType::Float => {}
+                ColumnType::Bool => {
+                    let mut buf = [0u8; 1];
+                    buf_cursor.read_exact(&mut buf).unwrap();
+                    let bool_val = match buf {
+                        [0x1] => true,
+                        _ => false,
+                    };
+
+                    row.push((
+                        c_name.to_string(),
+                        Expr::Value(sqlparser::ast::Value::Boolean(bool_val)),
+                    ))
+                }
+                ColumnType::String => {
+                    let mut offset_buf = [0u8; 8];
+                    buf_cursor.read_exact(&mut offset_buf).unwrap();
+
+                    let offset = u64::from_be_bytes(offset_buf);
+
+                    let str_val = read_string_from_buf(&mut buf_cursor, offset, true);
+
+                    row.push((
+                        c_name.to_string(),
+                        Expr::Value(sqlparser::ast::Value::SingleQuotedString(str_val)),
+                    ))
+                }
+                ColumnType::Binary => {}
+                ColumnType::DateTime => {}
+                _ => {}
+            }
+            debug!("Col vec {:?}", row);
+        }
+
+        row_collection
+            .rows
+            .push(row.iter().map(|val| val.1.clone()).collect::<Vec<Expr>>());
+
+        Ok(row_collection)
     }
 
-    pub fn read_from_disk(page_id: &usize) -> Result<Page, u32> {
-        log(format!("Reading page with id: {} from disk", page_id));
+    pub fn write_to_disk(&self, page_id: PageId) -> Result<(), NaadanError> {
+        log(format!("Flushing Data: {:?} to disk.", self));
+        let table_data_file = String::from(DB_TABLE_DATA_FILE)
+            .replace("{table_id}", page_id.get_table_id().to_string().as_str());
 
-        // TODO: read specific page by offset
-        let mut f = File::options().read(true).open(DB_DATAFILE).unwrap();
-        f.seek(std::io::SeekFrom::Start(1024 * 4 * (*page_id as u64 - 1)))
-            .unwrap();
-        let mut buf = [0; 1024 * 4];
+        match File::options()
+            .read(true)
+            .write(true)
+            .open(table_data_file.clone())
+        {
+            Ok(mut file) => {
+                debug!(
+                    "Page Index is :{}\nPage offset is at {}",
+                    page_id.get_page_index(),
+                    page_id.get_page_index() as u64 * 8 * 1024
+                );
+                file.seek(std::io::SeekFrom::Start(
+                    page_id.get_page_index() as u64 * 8 * 1024,
+                ))
+                .unwrap();
+                let write_bytes = bincode::serialize(&self).unwrap();
+                file.write_all(write_bytes.as_slice()).unwrap();
+                file.flush().unwrap();
 
-        match f.read_exact(&mut buf) {
+                return Ok(());
+            }
+            Err(_) => {
+                let mut file = File::options()
+                    .create(true)
+                    .write(true)
+                    .open(table_data_file)
+                    .unwrap();
+
+                let write_bytes = bincode::serialize(&self).unwrap();
+                file.write_all(write_bytes.as_slice()).unwrap();
+                file.flush().unwrap();
+
+                return Ok(());
+            }
+        }
+    }
+
+    pub fn read_from_disk(page_id: PageId) -> Result<Page, NaadanError> {
+        log(format!(
+            "Reading page with id: {} from disk",
+            page_id.get_page_id()
+        ));
+
+        let table_data_file = String::from(DB_TABLE_DATA_FILE)
+            .replace("{table_id}", page_id.get_table_id().to_string().as_str());
+        let mut file = File::options().read(true).open(table_data_file).unwrap();
+
+        file.seek(std::io::SeekFrom::Start(
+            page_id.get_page_index() as u64 * 8 * 1024,
+        ))
+        .unwrap();
+
+        let mut buf = [0; 8 * 1024];
+
+        match file.read_exact(&mut buf) {
             Ok(_) => {}
             Err(_) => {
-                f.read(&mut buf).unwrap();
+                file.read(&mut buf).unwrap();
             }
         }
         let page: Page = bincode::deserialize_from(&buf[..]).unwrap();
         Ok(page)
     }
 
-    pub fn flush_catalog_page(&self) -> Result<(), StorageEngineError> {
+    pub fn write_catalog_to_disk(&self) -> Result<(), NaadanError> {
         match File::options().write(true).open(DB_TABLE_CATALOG_FILE) {
             Ok(mut file) => {
                 let write_bytes = bincode::serialize(&self).unwrap();
                 match file.write_all(write_bytes.as_slice()) {
                     Ok(_) => {}
-                    Err(err) => return Err(StorageEngineError::PageFlushFailed),
+                    Err(err) => return Err(NaadanError::PageFlushFailed),
                 }
 
                 Ok(())
             }
-            Err(err) => return Err(StorageEngineError::PageFlushFailed),
+            Err(err) => return Err(NaadanError::PageFlushFailed),
         }
     }
 
-    pub fn read_catalog_from_disk() -> Result<Page, u32> {
+    pub fn read_catalog_from_disk() -> Result<Page, NaadanError> {
         match File::options().read(true).open(DB_TABLE_CATALOG_FILE) {
             Ok(mut file) => {
                 let mut buf = vec![0u8; 4 * 1024];
@@ -540,13 +581,19 @@ impl Page {
 
                 let mut page = Page::new();
                 let schema = HashMap::from([
-                    ("id".to_string(), Column::new(ColumnType::Int, false)),
-                    ("name".to_string(), Column::new(ColumnType::String, false)),
+                    ("id".to_string(), Column::new(ColumnType::Int, 0, false)),
+                    (
+                        "name".to_string(),
+                        Column::new(ColumnType::String, 0, false),
+                    ),
                     (
                         "columns".to_string(),
-                        Column::new(ColumnType::String, false),
+                        Column::new(ColumnType::String, 0, false),
                     ),
-                    ("indexes".to_string(), Column::new(ColumnType::Int, false)),
+                    (
+                        "indexes".to_string(),
+                        Column::new(ColumnType::Int, 0, false),
+                    ),
                 ]);
 
                 let table = Table {
@@ -565,25 +612,33 @@ impl Page {
             }
         }
     }
-
-    pub fn write_to_disk(&self, page_id: &usize) -> Result<(), u32> {
-        log(format!("Writing page with id: {} to disk", page_id));
-        log(format!("{:?}", self));
-        // Encode to something implementing `Write`
-        let mut f = File::options()
-            .create(true)
-            .write(true)
-            .open(DB_DATAFILE)
-            .unwrap();
-        f.seek(std::io::SeekFrom::Start(1024 * 4 * (*page_id as u64 - 1)))
-            .unwrap();
-        let write_bytes = bincode::serialize(&self).unwrap();
-        f.write_all(write_bytes.as_slice()).unwrap();
-
-        Ok(())
-    }
 }
 
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageId(pub u64);
+
+impl PageId {
+    pub fn new(table_id: u16, page_index: u32) -> Self {
+        let page_id = (table_id as u64).shl(48) | page_index as u64;
+
+        Self(page_id)
+    }
+    pub fn get_table_id(&self) -> u16 {
+        let table_id = self.0.shr(48) & 0xff_ff as u64;
+
+        table_id as u16
+    }
+
+    pub fn get_page_id(&self) -> u64 {
+        self.0
+    }
+
+    pub fn get_page_index(&self) -> u32 {
+        let index = self.0 & 0x00_00_00_00_ff_ff_ff_ff as u64;
+
+        index as u32 - 1
+    }
+}
 #[cfg(test)]
 mod tests {
     use crate::storage::catalog::{Column, ColumnType};
@@ -616,51 +671,51 @@ mod tests {
         }
     }
 
-    #[test]
-    fn read_page_from_disk() {
-        fs::remove_file(DB_DATAFILE);
-        let mut reg = Region::new(&GLOBAL);
-        println!("*** Test Starting <read_page_from_disk> ***\n");
+    // #[test]
+    // fn read_page_from_disk() {
+    //     fs::remove_file(DB_DATAFILE);
+    //     let mut reg = Region::new(&GLOBAL);
+    //     println!("*** Test Starting <read_page_from_disk> ***\n");
 
-        let mut s_engine = NaadanStorageEngine::init(1);
-        //println!("Stats at 1: {:#?}", reg.change());
-        let row_data = get_test_data();
-        let row2_data = get_test_data();
+    //     let mut s_engine = NaadanStorageEngine::init(1);
+    //     //println!("Stats at 1: {:#?}", reg.change());
+    //     let row_data = get_test_data();
+    //     let row2_data = get_test_data();
 
-        let row3_data = get_test_data();
+    //     let row3_data = get_test_data();
 
-        //println!("Stats at 2: {:#?}", reg.change_and_reset());
+    //     //println!("Stats at 2: {:#?}", reg.change_and_reset());
 
-        let _ = s_engine.write_row(&0x41, row_data);
-        println!("Stats at 4: {:#?}", reg.change());
+    //     let _ = s_engine.write_row(&0x41, row_data);
+    //     println!("Stats at 4: {:#?}", reg.change());
 
-        let _ = s_engine.write_row(&0x42, row2_data);
-        // // println!("Stats at 4: {:#?}", reg.change());
+    //     let _ = s_engine.write_row(&0x42, row2_data);
+    //     // // println!("Stats at 4: {:#?}", reg.change());
 
-        let _ = s_engine.write_row(&0x45, row3_data.clone());
-        // println!("Stats at 4: {:#?}", reg.change());
+    //     let _ = s_engine.write_row(&0x45, row3_data.clone());
+    //     // println!("Stats at 4: {:#?}", reg.change());
 
-        // let _ = s_engine.write_row(&0x56, row3_data.clone());
+    //     // let _ = s_engine.write_row(&0x56, row3_data.clone());
 
-        // for i in 0..2 {
-        //     //sleep(Duration::from_millis(1000));
-        //     //println!("{}", i);
-        //     let _ = s_engine.write_row(&(0x43 + i), row3_data.clone());
-        // }
+    //     // for i in 0..2 {
+    //     //     //sleep(Duration::from_millis(1000));
+    //     //     //println!("{}", i);
+    //     //     let _ = s_engine.write_row(&(0x43 + i), row3_data.clone());
+    //     // }
 
-        let _ = s_engine.read_row(0x45);
-        println!("Stats at 5: {:#?}", reg.change());
-    }
+    //     let _ = s_engine.read_row(0x45);
+    //     println!("Stats at 5: {:#?}", reg.change());
+    // }
 
     #[test]
     fn catalog_write() {
         let mut page = Page::new_with_capacity(4 * 1024);
 
         let mut schema = HashMap::from([
-            ("id".to_string(), Column::new(ColumnType::Int, false)),
-            ("nam".to_string(), Column::new(ColumnType::String, false)),
-            ("pass".to_string(), Column::new(ColumnType::Bool, false)),
-            ("ic3".to_string(), Column::new(ColumnType::Float, false)),
+            ("id".to_string(), Column::new(ColumnType::Int, 0, false)),
+            ("nam".to_string(), Column::new(ColumnType::String, 0, false)),
+            ("pass".to_string(), Column::new(ColumnType::Bool, 0, false)),
+            ("ic3".to_string(), Column::new(ColumnType::Float, 0, false)),
         ]);
 
         for i in 1..2 as u32 {
@@ -701,60 +756,60 @@ mod tests {
         }
     }
 
-    #[test]
-    fn it_works() {
-        fs::remove_file(DB_DATAFILE);
-        println!("*** Test Starting ***\n");
+    // #[test]
+    // fn it_works() {
+    //     fs::remove_file(DB_DATAFILE);
+    //     println!("*** Test Starting ***\n");
 
-        let mut s_engine = NaadanStorageEngine::init(200);
-        let mut row_data = get_test_data();
+    //     let mut s_engine = NaadanStorageEngine::init(200);
+    //     let mut row_data = get_test_data();
 
-        let mut row_id: usize = 7;
-        s_engine.write_row(&row_id, row_data);
+    //     let mut row_id: usize = 7;
+    //     s_engine.write_row(&row_id, row_data);
 
-        println!("\n Reading 1 \n");
-        s_engine.read_row(row_id);
+    //     println!("\n Reading 1 \n");
+    //     s_engine.read_row(row_id);
 
-        row_id = 2;
-        row_data = get_test_data();
-        s_engine.write_row(&row_id, row_data);
+    //     row_id = 2;
+    //     row_data = get_test_data();
+    //     s_engine.write_row(&row_id, row_data);
 
-        println!("\n Reading 2 \n");
-        s_engine.read_row(row_id);
+    //     println!("\n Reading 2 \n");
+    //     s_engine.read_row(row_id);
 
-        s_engine.reset_memory();
+    //     s_engine.reset_memory();
 
-        println!("\n Reading 3 \n");
-        s_engine.read_row(row_id);
+    //     println!("\n Reading 3 \n");
+    //     s_engine.read_row(row_id);
 
-        row_id = 3;
+    //     row_id = 3;
 
-        row_data = get_test_data();
-        s_engine.write_row(&row_id, row_data);
+    //     row_data = get_test_data();
+    //     s_engine.write_row(&row_id, row_data);
 
-        row_id = 4;
+    //     row_id = 4;
 
-        row_data = get_test_data();
-        s_engine.write_row(&row_id, row_data);
+    //     row_data = get_test_data();
+    //     s_engine.write_row(&row_id, row_data);
 
-        row_id = 5;
+    //     row_id = 5;
 
-        row_data = get_test_data();
-        s_engine.write_row(&row_id, row_data);
+    //     row_data = get_test_data();
+    //     s_engine.write_row(&row_id, row_data);
 
-        row_id = 6;
+    //     row_id = 6;
 
-        row_data = get_test_data();
-        s_engine.write_row(&row_id, row_data);
+    //     row_data = get_test_data();
+    //     s_engine.write_row(&row_id, row_data);
 
-        println!("\n Reading 4 \n");
-        s_engine.read_row(row_id);
+    //     println!("\n Reading 4 \n");
+    //     s_engine.read_row(row_id);
 
-        s_engine.reset_memory();
+    //     s_engine.reset_memory();
 
-        println!("\n Reading 5 \n");
-        s_engine.read_row(row_id);
+    //     println!("\n Reading 5 \n");
+    //     s_engine.read_row(row_id);
 
-        println!("\n *** Test Ended ***\n");
-    }
+    //     println!("\n *** Test Ended ***\n");
+    // }
 }

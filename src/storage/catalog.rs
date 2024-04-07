@@ -20,13 +20,15 @@ pub struct Table {
 #[derive(Debug, Default, Clone)]
 pub struct Column {
     pub column_type: ColumnType,
+    pub offset: u64,
     pub is_nullable: bool,
 }
 
 impl Column {
-    pub fn new(column_type: ColumnType, is_null: bool) -> Self {
+    pub fn new(column_type: ColumnType, offset: u64, is_null: bool) -> Self {
         Self {
             column_type,
+            offset,
             is_nullable: is_null,
         }
     }
@@ -58,15 +60,35 @@ impl From<&DataType> for ColumnType {
     }
 }
 
+pub struct Offset(u64);
+
+impl Offset {
+    pub fn get_value(&self) -> u64 {
+        self.0
+    }
+}
+
+impl From<&DataType> for Offset {
+    fn from(item: &DataType) -> Self {
+        match item {
+            DataType::Varchar(Some(val)) => Offset(8),
+            DataType::Bool => Offset(1),
+            DataType::Int(val) => Offset(4),
+            _ => Offset(0),
+        }
+    }
+}
+
 impl ColumnType {
     pub(crate) fn from_bytes(c_type: u8) -> ColumnType {
         match c_type {
-            0 => Self::Int,
-            1 => Self::Float,
-            2 => Self::Bool,
-            3 => Self::String,
-            4 => Self::Binary,
-            5 => Self::DateTime,
+            0 => Self::UnSupported,
+            1 => Self::Int,
+            2 => Self::Float,
+            3 => Self::Bool,
+            4 => Self::String,
+            5 => Self::Binary,
+            6 => Self::DateTime,
             _ => {
                 panic!()
             }

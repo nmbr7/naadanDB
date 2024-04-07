@@ -2,14 +2,12 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::{Rc, Weak},
-    sync::Arc,
     time::Duration,
 };
 
-use sqlparser::ast::{Value, Values};
-use tokio::sync::Mutex;
+use sqlparser::ast::Values;
 
-use crate::storage::catalog::Column;
+use crate::storage::catalog::{Column, Table};
 
 use super::query_engine::ExecContext;
 
@@ -18,13 +16,12 @@ type WeakEdge<T> = Weak<RefCell<T>>;
 
 #[derive(Debug, Clone)]
 pub struct ScanExpr {
-    pub table_id: u16,
-    pub schema: HashMap<String, Column>,
+    pub schema: Table,
 }
 
 impl ScanExpr {
-    pub fn new(table_id: u16, schema: HashMap<String, Column>) -> Self {
-        Self { table_id, schema }
+    pub fn new(schema: Table) -> Self {
+        Self { schema }
     }
 }
 
