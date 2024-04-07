@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::query::plan::*;
-use crate::storage::catalog::{self, Column, ColumnType};
+use crate::storage::catalog::{self, Column, ColumnType, Offset, Table};
 use crate::storage::StorageEngine;
 
 use log::{debug, error};
-use sqlparser::ast::{SetExpr, Statement, TableFactor};
+use sqlparser::ast::{SetExpr, Statement, TableFactor, Values};
 
 use tokio::sync::Mutex;
 use tokio::task;
@@ -17,7 +17,7 @@ use tokio::task;
 use super::NaadanQuery;
 
 pub struct ExecContext {
-    last_result: Option<Vec<u8>>,
+    last_result: Option<Values>,
     last_op_name: Option<String>,
     last_op_time: Option<Duration>,
     last_op_status: Option<bool>,
@@ -36,7 +36,7 @@ impl ExecContext {
         }
     }
 
-    pub fn last_result(&self) -> Option<&Vec<u8>> {
+    pub fn last_result(&self) -> Option<&Values> {
         self.last_result.as_ref()
     }
 
@@ -144,6 +144,38 @@ fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr)
 
 fn scan_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
     debug!("scaning table");
+
+    let mut error = false;
+    let mut invalid_type = false;
+    let result: Values;
+
+    match physical_plan {
+        PhysicalPlanExpr::Relational(val) => match val {
+            RelationalExprType::ScanExpr(expr) => {
+                {
+                    let mut storage_instance = task::block_in_place(|| {
+                        println!("Locking storage_instance {:?}", SystemTime::now());
+                        exec_context.get_storage_engine().unwrap().blocking_lock()
+                        // do some compute-heavy work or call synchronous code
+                    });
+
+                    result = storage_instance.read_rows(&[1], &expr.schema).unwrap();
+                }
+                exec_context.last_result = Some(result);
+            }
+            _ => invalid_type = true,
+        },
+        _ => invalid_type = true,
+    }
+
+    if error {
+        exec_context.last_op_status = Some(false);
+        if invalid_type {
+            error!("select table with wrong expr type ");
+        }
+    } else {
+        exec_context.last_op_status = Some(true);
+    }
 }
 
 pub struct NaadanQueryEngine {
@@ -250,6 +282,8 @@ impl NaadanQueryEngine {
                         }
                     }
 
+                    debug!("Columns {:?}", columns);
+                    let mut offset = 0;
                     for col in columns {
                         let mut is_nullable = false;
 
@@ -272,16 +306,21 @@ impl NaadanQueryEngine {
                             }
                         }
 
+                        debug!("Column offset is {:?}", offset);
+
                         column_map.insert(
                             col.name.value.clone(),
                             Column {
                                 column_type: ColumnType::from(&col.data_type),
+                                offset,
                                 is_nullable,
                             },
                         );
+
+                        offset += Offset::from(&col.data_type).get_value();
                     }
 
-                    // Check if a table exist with the same name.
+                    // TODO: Check if a table exist with the same name.
 
                     // Create plan
                     let local_plan = PlanExpr::Relational(Relational {
@@ -439,7 +478,7 @@ impl NaadanQueryEngine {
                 TableFactor::Table { name, .. } => {
                     let table_name = &name.0.first().unwrap().value;
                     let table_id: u16;
-                    let table_schema: HashMap<String, Column>;
+                    let table_schema: Table;
                     {
                         let storage_instance = task::block_in_place(move || {
                             println!("Locking storage_instance {:?}", SystemTime::now());
@@ -450,7 +489,7 @@ impl NaadanQueryEngine {
                         match storage_instance.get_table_details(table_name) {
                             Ok(table_catalog) => {
                                 table_id = table_catalog.id;
-                                table_schema = table_catalog.schema.clone();
+                                table_schema = table_catalog.clone();
                             }
                             Err(_) => {
                                 debug!(" Invalid Table {}", table_name);
@@ -461,10 +500,7 @@ impl NaadanQueryEngine {
 
                     debug!(" Select query on Table {}", table_name);
                     let value = PlanExpr::Relational(Relational {
-                        rel_type: RelationalExprType::ScanExpr(ScanExpr::new(
-                            table_id,
-                            table_schema,
-                        )),
+                        rel_type: RelationalExprType::ScanExpr(ScanExpr::new(table_schema)),
                         group: None,
                         stats: Some(Stats {
                             estimated_row_count: 0,
@@ -534,11 +570,24 @@ impl NaadanQueryEngine {
             (plan.plane_exec_fn)(&mut exec_context, plan.plan_expr);
         }
 
+        let mut query_result = String::new();
+        match exec_context.last_result {
+            Some(res) => {
+                for r in res.rows {
+                    r.iter()
+                        .for_each(|val| query_result += format!(" {}", val.to_string()).as_str());
+                }
+            }
+            None => {}
+        }
+
         let elapsed_time = now.elapsed();
 
         if exec_context.last_op_status.unwrap_or(true) {
             Ok(format!(
-                "Plan executed success in {:.3}ms",
+                "{:?}\n\n
+                Plan executed success in {:.3}ms",
+                query_result,
                 elapsed_time.as_micros() as f64 / 1000.0
             )
             .into())
