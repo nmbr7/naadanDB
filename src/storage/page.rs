@@ -136,7 +136,7 @@ impl CatalogPage for Page {
         let mut buf_cursor = Cursor::new(&data.data);
 
         let mut table_count_buf = [0u8; 4];
-        let table_count = buf_cursor.read_exact(&mut table_count_buf).unwrap();
+        buf_cursor.read_exact(&mut table_count_buf).unwrap();
 
         let mut offset_buf = [0u8; 8];
         let mut len_buf = [0u8; 2];
