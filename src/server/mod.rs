@@ -1,4 +1,4 @@
-use std::str::from_utf8;
+use std::{result, str::from_utf8};
 
 use log::{debug, error, info, trace};
 use rand::Rng;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::{
     query::{query_engine::NaadanQueryEngine, NaadanQuery},
-    storage::{storage_engine::NaadanStorageEngine, StorageEngine},
+    storage::{storage_engine::NaadanStorageEngine, NaadanError, StorageEngine},
 };
 
 #[derive(Debug)]
@@ -63,11 +63,11 @@ impl NaadanServer {
         server_instance: Arc<NaadanServer>,
         mut socket: TcpStream,
         _n: usize,
-    ) -> Result<(), bool> {
+    ) -> Result<(), NaadanError> {
         info!("Got new request from IP: {:?}", socket.peer_addr());
 
         let buffer: &mut Vec<u8> = &mut Vec::new();
-        let mut result = vec![];
+        let result: Vec<u8>;
         let sql_statement = match get_query_from_request(&mut socket, buffer).await {
             Ok(value) => value,
             Err(value) => return Err(value),
@@ -80,7 +80,7 @@ impl NaadanServer {
             Ok(res) => res,
             Err(err) => {
                 let _ = socket.write(err.to_string().as_bytes()).await;
-                return Err(false);
+                return Err(err);
             }
         };
 
@@ -89,36 +89,7 @@ impl NaadanServer {
             let storage_engine_instance = server_instance.storage_engine.clone();
             let query_engine = NaadanQueryEngine::init(storage_engine_instance).await;
 
-            // Create logical plan for the query from the AST
-            let lp_result = query_engine.prepare_logical_plan(&sql_query).await;
-
-            let logical_plan = match lp_result {
-                Ok(val) => val,
-                Err(err) => {
-                    socket.write(err.to_string().as_bytes()).await.unwrap();
-                    return Err(false);
-                }
-            };
-            debug!("Logical Plan is : {:?}", logical_plan);
-
-            // Prepare the physical plan
-            let pp_result = query_engine.prepare_exec_plan(&logical_plan);
-            let physical_plan = match pp_result {
-                Ok(val) => val,
-                Err(err) => {
-                    socket.write(err.to_string().as_bytes()).await.unwrap();
-                    return Err(false);
-                }
-            };
-
-            // Execute the queries using the physical plan
-            let res = query_engine.execute(physical_plan);
-            match res {
-                Ok(val) => {
-                    result = val;
-                }
-                Err(err) => result = format!("Exec error {:?}", err).into(),
-            }
+            result = query_engine.process_query(sql_query).await;
         }
 
         socket.write(&result).await.unwrap();
@@ -134,22 +105,23 @@ impl NaadanServer {
 async fn get_query_from_request<'a>(
     socket: &'a mut TcpStream,
     buffer: &'a mut Vec<u8>,
-) -> Result<&'a str, bool> {
+) -> Result<&'a str, NaadanError> {
     let mut count = 0;
     loop {
         let bytes = socket.read_buf(buffer).await.unwrap();
         if 0 == bytes {
-            if buffer.is_empty() {
-                return Err(true);
-            } else {
-                return Err(false);
-            }
+            debug!("Read zero bytes from server");
+            return Err(NaadanError::Unknown);
         }
 
         count += bytes;
 
-        //debug!("{:?}", from_utf8(buffer));
+        //debug!("Bytes: {:?}", buffer);
         if buffer.as_slice()[(count - 4)..count] == b"EOF\n".to_vec() {
+            if buffer.len() <= 5 {
+                debug!("Empty query received");
+                return Err(NaadanError::Unknown);
+            }
             break;
         }
     }

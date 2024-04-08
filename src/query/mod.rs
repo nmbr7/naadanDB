@@ -1,5 +1,7 @@
 use sqlparser::{ast::Statement, parser::ParserError};
 
+use crate::storage::NaadanError;
+
 use self::parser::NaadanParser;
 
 pub mod parser;
@@ -14,14 +16,14 @@ pub struct NaadanQuery {
 }
 
 impl NaadanQuery {
-    pub fn init(query: String) -> Result<Self, ParserError> {
+    pub fn init(query: String) -> Result<Self, NaadanError> {
         match NaadanParser::parse(&query) {
             Ok(ast) => Ok(Self {
                 query_string: query.clone(),
                 _params: vec![],
                 ast: ast,
             }),
-            Err(err) => return Err(err),
+            Err(err) => return Err(NaadanError::QueryParseFailed(err.to_string())),
         }
     }
 }

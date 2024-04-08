@@ -128,7 +128,7 @@ impl StorageEngine for NaadanStorageEngine {
         self.catalog_page.get(&1).unwrap().get_table_details(name)
     }
 
-    fn add_table(&mut self, table: &mut Table) -> Result<TableIdType, NaadanError> {
+    fn add_table_details(&mut self, table: &mut Table) -> Result<TableIdType, NaadanError> {
         let catalog_page = self.catalog_page.get_mut(&1).unwrap();
         table.id = self.engine_metadata.table_count as u16 + 1;
         self.engine_metadata.table_count += 1;
@@ -144,7 +144,7 @@ impl StorageEngine for NaadanStorageEngine {
         Ok(10)
     }
 
-    fn add_row_into_table(
+    fn write_table_rows(
         &mut self,
         row_values: Values,
         table: &Table,
@@ -231,11 +231,19 @@ impl StorageEngine for NaadanStorageEngine {
     //     Err(false)
     // }
 
-    fn read_rows(&mut self, row_id: &[usize], schema: &Table) -> Result<Values, NaadanError> {
+    fn read_table_rows(&self, row_id: &[usize], schema: &Table) -> Result<Values, NaadanError> {
         let row_id_value = &(row_id.last().unwrap());
-        let page_id = self.row_index.get(row_id_value).unwrap();
-        let page = self.buffer_pool.get(&page_id).unwrap();
+        let page_id = match self.row_index.get(row_id_value) {
+            Some(pageid) => pageid,
+            None => {
+                return Ok(Values {
+                    explicit_row: true,
+                    rows: vec![],
+                })
+            }
+        };
 
+        let page = self.buffer_pool.get(&page_id).unwrap();
         let row = page.read_table_row(&row_id_value, schema).unwrap();
 
         Ok(row)

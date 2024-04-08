@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::query::plan::*;
 use crate::storage::catalog::{self, Column, ColumnType, Offset, Table};
-use crate::storage::StorageEngine;
+use crate::storage::{NaadanError, StorageEngine};
 
 use log::{debug, error};
 use sqlparser::ast::{SetExpr, Statement, TableFactor, Values};
@@ -71,7 +71,7 @@ fn insert_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr)
                             // TODO check row constraints, and procceed only if there are no conflict.
                             debug!("Inserting into Table '{}'", &expr.table_name);
                             storage_instance
-                                .add_row_into_table(expr.columns, &val)
+                                .write_table_rows(expr.columns, &val)
                                 .unwrap();
                             error = false;
                         }
@@ -122,7 +122,7 @@ fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr)
                             error = true;
                         }
                         Err(_) => {
-                            storage_instance.add_table(&mut table).unwrap();
+                            storage_instance.add_table_details(&mut table).unwrap();
                         }
                     }
                 }
@@ -159,7 +159,7 @@ fn scan_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
                         // do some compute-heavy work or call synchronous code
                     });
 
-                    result = storage_instance.read_rows(&[1], &expr.schema).unwrap();
+                    result = storage_instance.read_table_rows(&[1], &expr.schema).unwrap();
                 }
                 exec_context.last_result = Some(result);
             }
@@ -189,10 +189,55 @@ impl NaadanQueryEngine {
         }
     }
 
-    pub fn prepare_exec_plan<'a>(
+    pub async fn process_query(&self, query: NaadanQuery) -> Vec<u8> {
+        let mut result: Vec<Vec<u8>> = Vec::new();
+        for statement in query.ast.iter() {
+            result.push(
+                ("## Query: ".to_string() + statement.to_string().as_str())
+                    .as_bytes()
+                    .to_vec(),
+            );
+            // Create logical plan for the query from the AST
+            let lp_result = self.prepare_logical_plan(statement).await;
+
+            let logical_plan = match lp_result {
+                Ok(val) => val,
+                Err(err) => {
+                    add_error_msg(&mut result, err);
+                    continue;
+                }
+            };
+            debug!("Logical Plan is : {:?}", logical_plan);
+
+            // Prepare the physical plan
+            let pp_result = self.prepare_physical_plan(&logical_plan).await;
+            let physical_plan = match pp_result {
+                Ok(val) => val,
+                Err(err) => {
+                    add_error_msg(&mut result, err);
+                    continue;
+                }
+            };
+
+            // Execute the queries using the physical plan
+            let res = self.execute(physical_plan);
+
+            match res {
+                Ok(val) => result.push(val),
+                Err(err) => {
+                    add_error_msg(&mut result, err);
+                    continue;
+                }
+            }
+        }
+
+        result.join("\n\n".as_bytes())
+    }
+
+    async fn prepare_physical_plan<'a>(
         &'a self,
         logical_plan: &Vec<Plan<'a>>,
-    ) -> Result<Vec<PhysicalPlan>, bool> {
+    ) -> Result<Vec<PhysicalPlan>, NaadanError> {
         let mut exec_vec: Vec<PhysicalPlan> = Vec::new();
 
         match logical_plan.last() {
@@ -245,207 +290,205 @@ impl NaadanQueryEngine {
         Ok(exec_vec)
     }
 
-    pub async fn prepare_logical_plan<'a>(
+    async fn prepare_logical_plan<'a>(
         &'a self,
-        query: &'a NaadanQuery,
-    ) -> Result<Vec<Plan<'a>>, bool> {
+        statement: &Statement,
+    ) -> Result<Vec<Plan<'a>>, NaadanError> {
         let mut final_plan_list: Vec<Plan<'a>> = vec![];
         // Iterate through the AST and create best logical plan which potentially has the least f execution
 
         // TODO: Read from the DB catalog to get info about the the table (table name id, row count, columns etc..)
         //       based on the info from the catalog info, validate the query.
-        for statement in query.ast.iter() {
-            let mut plan: Plan = Plan {
-                plan_stats: Some(Stats {
-                    estimated_row_count: 0,
-                    estimated_time: Duration::from_millis(0),
-                }),
-                plan_expr_root: None,
-            };
 
-            match statement {
-                Statement::CreateTable { name, columns, .. } => {
-                    let mut column_map: HashMap<String, Column> = HashMap::new();
-                    let table_name = name.0.last().unwrap().value.clone();
-                    {
-                        let storage_instance = task::block_in_place(move || {
-                            println!("Locking storage_instance {:?}", SystemTime::now());
-                            self.storage_engine.blocking_lock()
-                        });
+        let mut plan: Plan = Plan {
+            plan_stats: Some(Stats {
+                estimated_row_count: 0,
+                estimated_time: Duration::from_millis(0),
+            }),
+            plan_expr_root: None,
+        };
 
-                        match storage_instance.get_table_details(&table_name) {
-                            Ok(_) => {
-                                debug!("Table '{}' already exists", &table_name);
-                                return Err(false);
-                            }
-                            Err(_) => {}
-                        }
-                    }
-
-                    debug!("Columns {:?}", columns);
-                    let mut offset = 0;
-                    for col in columns {
-                        let mut is_nullable = false;
-
-                        for opts in &col.options {
-                            match &opts.option {
-                                sqlparser::ast::ColumnOption::Null => {
-                                    is_nullable = true;
-                                }
-                                sqlparser::ast::ColumnOption::NotNull => todo!(),
-                                sqlparser::ast::ColumnOption::Default(_) => todo!(),
-                                sqlparser::ast::ColumnOption::Unique { .. } => todo!(),
-                                sqlparser::ast::ColumnOption::ForeignKey { .. } => todo!(),
-                                sqlparser::ast::ColumnOption::Check(_) => todo!(),
-                                sqlparser::ast::ColumnOption::DialectSpecific(_) => todo!(),
-                                sqlparser::ast::ColumnOption::CharacterSet(_) => todo!(),
-                                sqlparser::ast::ColumnOption::Comment(_) => todo!(),
-                                sqlparser::ast::ColumnOption::OnUpdate(_) => todo!(),
-                                sqlparser::ast::ColumnOption::Generated { .. } => todo!(),
-                                sqlparser::ast::ColumnOption::Options(_) => todo!(),
-                            }
-                        }
-
-                        debug!("Column offset is {:?}", offset);
-
-                        column_map.insert(
-                            col.name.value.clone(),
-                            Column {
-                                column_type: ColumnType::from(&col.data_type),
-                                offset,
-                                is_nullable,
-                            },
-                        );
-
-                        offset += Offset::from(&col.data_type).get_value();
-                    }
-
-                    // TODO: Check if a table exist with the same name.
-
-                    // Create plan
-                    let local_plan = PlanExpr::Relational(Relational {
-                        rel_type: RelationalExprType::CreateTableExpr(CreateTableExpr {
-                            table_name: table_name,
-                            columns: column_map,
-                        }),
-                        group: None,
-                        stats: None,
+        match statement {
+            Statement::CreateTable { name, columns, .. } => {
+                let mut column_map: HashMap<String, Column> = HashMap::new();
+                let table_name = name.0.last().unwrap().value.clone();
+                {
+                    let storage_instance = task::block_in_place(move || {
+                        println!("Locking storage_instance {:?}", SystemTime::now());
+                        self.storage_engine.blocking_lock()
                     });
 
-                    plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+                    match storage_instance.get_table_details(&table_name) {
+                        Ok(_) => {
+                            debug!("Table '{}' already exists", &table_name);
+                            return Err(NaadanError::TableAlreadyExists);
+                        }
+                        Err(_) => {}
+                    }
                 }
-                Statement::AlterTable { .. } => {}
 
-                Statement::Insert {
-                    table_name,
-                    columns,
-                    source,
-                    ..
-                } => {
-                    debug!(
-                        "Insert statement, table name is {} with columns {:?} and values {:?}",
-                        table_name, columns, source
+                debug!("Columns {:?}", columns);
+                let mut offset = 0;
+                for col in columns {
+                    let mut is_nullable = false;
+
+                    for opts in &col.options {
+                        match &opts.option {
+                            sqlparser::ast::ColumnOption::Null => {
+                                is_nullable = true;
+                            }
+                            sqlparser::ast::ColumnOption::NotNull => todo!(),
+                            sqlparser::ast::ColumnOption::Default(_) => todo!(),
+                            sqlparser::ast::ColumnOption::Unique { .. } => todo!(),
+                            sqlparser::ast::ColumnOption::ForeignKey { .. } => todo!(),
+                            sqlparser::ast::ColumnOption::Check(_) => todo!(),
+                            sqlparser::ast::ColumnOption::DialectSpecific(_) => todo!(),
+                            sqlparser::ast::ColumnOption::CharacterSet(_) => todo!(),
+                            sqlparser::ast::ColumnOption::Comment(_) => todo!(),
+                            sqlparser::ast::ColumnOption::OnUpdate(_) => todo!(),
+                            sqlparser::ast::ColumnOption::Generated { .. } => todo!(),
+                            sqlparser::ast::ColumnOption::Options(_) => todo!(),
+                        }
+                    }
+
+                    debug!("Column offset is {:?}", offset);
+
+                    column_map.insert(
+                        col.name.value.clone(),
+                        Column {
+                            column_type: ColumnType::from(&col.data_type),
+                            offset,
+                            is_nullable,
+                        },
                     );
-                    let t_name = table_name.0.last().unwrap().value.clone();
 
-                    {
-                        let storage_instance = task::block_in_place(move || {
-                            println!("Locking storage_instance {:?}", SystemTime::now());
-                            self.storage_engine.blocking_lock()
-                            // do some compute-heavy work or call synchronous code
-                        });
-
-                        match storage_instance.get_table_details(&t_name) {
-                            Ok(table_catalog) => {
-                                // TODO: validate the input columns againt the schema
-                                let row_values = match &*(source.as_ref().unwrap().body) {
-                                    SetExpr::Values(val) => val.clone(),
-                                    _ => return Err(false),
-                                };
-
-                                // Create plan
-                                let local_plan = PlanExpr::Relational(Relational {
-                                    rel_type: RelationalExprType::InsertExpr(InsertExpr {
-                                        table_name: t_name,
-                                        columns: row_values,
-                                    }),
-                                    group: None,
-                                    stats: None,
-                                });
-
-                                plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
-                            }
-                            Err(_) => {
-                                debug!(" Invalid Table {}", table_name);
-                                return Err(false);
-                            }
-                        }
-                    }
+                    offset += Offset::from(&col.data_type).get_value();
                 }
-                Statement::Update { .. } => {}
-                Statement::Delete { .. } => {}
 
-                Statement::StartTransaction { .. } => {}
-                Statement::Rollback { .. } => {}
-                Statement::Commit { .. } => {}
+                // TODO: Check if a table exist with the same name.
 
-                Statement::CreateDatabase { .. } => {}
-                Statement::Drop { .. } => {}
+                // Create plan
+                let local_plan = PlanExpr::Relational(Relational {
+                    rel_type: RelationalExprType::CreateTableExpr(CreateTableExpr {
+                        table_name: table_name,
+                        columns: column_map,
+                    }),
+                    group: None,
+                    stats: None,
+                });
 
-                Statement::CreateIndex { .. } => {}
-                Statement::AlterIndex { .. } => {}
+                plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+            }
+            Statement::AlterTable { .. } => {}
 
-                Statement::Query(query_data) => {
-                    match &*query_data.body {
-                        SetExpr::Select(select_query) => {
-                            //  Get the query target Tables as in the 'FROM' expression
-                            let result = self.process_select_query(select_query);
-                            let expr_group = match result {
-                                Ok(val) => val,
-                                Err(err) => {
-                                    debug!("Query failed with error: {}", err);
-                                    return Err(false);
-                                }
+            Statement::Insert {
+                table_name,
+                columns,
+                source,
+                ..
+            } => {
+                debug!(
+                    "Insert statement, table name is {} with columns {:?} and values {:?}",
+                    table_name, columns, source
+                );
+                let t_name = table_name.0.last().unwrap().value.clone();
+
+                {
+                    let storage_instance = task::block_in_place(move || {
+                        println!("Locking storage_instance {:?}", SystemTime::now());
+                        self.storage_engine.blocking_lock()
+                        // do some compute-heavy work or call synchronous code
+                    });
+
+                    match storage_instance.get_table_details(&t_name) {
+                        Ok(table_catalog) => {
+                            // TODO: validate the input columns againt the schema
+                            let row_values = match &*(source.as_ref().unwrap().body) {
+                                SetExpr::Values(val) => val.clone(),
+                                _ => return Err(NaadanError::LogicalPlanFailed),
                             };
-                            debug!("{:#?}", expr_group);
-                            let first_vec = expr_group.first().unwrap();
-                            let first_expr = Rc::clone(first_vec.borrow().exprs.first().unwrap());
-                            plan.plan_expr_root = Some(first_expr);
-                            //debug!("{:?}", expr_group);
+
+                            // Create plan
+                            let local_plan = PlanExpr::Relational(Relational {
+                                rel_type: RelationalExprType::InsertExpr(InsertExpr {
+                                    table_name: t_name,
+                                    columns: row_values,
+                                }),
+                                group: None,
+                                stats: None,
+                            });
+
+                            plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
                         }
-                        // TODO
-                        // sqlparser::ast::SetExpr::Query(_) => todo!(),
-                        // sqlparser::ast::SetExpr::SetOperation {
-                        //     op,
-                        //     set_quantifier,
-                        //     left,
-                        //     right,
-                        // } => todo!(),
-                        // sqlparser::ast::SetExpr::Values(_) => todo!(),
-                        // sqlparser::ast::SetExpr::Insert(_) => todo!(),
-                        // sqlparser::ast::SetExpr::Update(_) => todo!(),
-                        // sqlparser::ast::SetExpr::Table(_) => todo!(),
-                        _ => debug!("Provided Query is {:?} ", &*query_data.body),
+                        Err(err) => {
+                            error!("{}", err.to_string());
+                            return Err(err);
+                        }
                     }
-                }
-                _ => {
-                    debug!(
-                        "Provided statement {:?} doesn't have plans for now",
-                        statement
-                    )
                 }
             }
+            Statement::Update { .. } => {}
+            Statement::Delete { .. } => {}
 
-            final_plan_list.push(plan);
+            Statement::StartTransaction { .. } => {}
+            Statement::Rollback { .. } => {}
+            Statement::Commit { .. } => {}
+
+            Statement::CreateDatabase { .. } => {}
+            Statement::Drop { .. } => {}
+
+            Statement::CreateIndex { .. } => {}
+            Statement::AlterIndex { .. } => {}
+
+            Statement::Query(query_data) => {
+                match &*query_data.body {
+                    SetExpr::Select(select_query) => {
+                        //  Get the query target Tables as in the 'FROM' expression
+                        let result = self.process_select_query(select_query);
+                        let expr_group = match result {
+                            Ok(val) => val,
+                            Err(err) => {
+                                debug!("Query failed with error: {}", err);
+                                return Err(err);
+                            }
+                        };
+                        debug!("{:#?}", expr_group);
+                        let first_vec = expr_group.first().unwrap();
+                        let first_expr = Rc::clone(first_vec.borrow().exprs.first().unwrap());
+                        plan.plan_expr_root = Some(first_expr);
+                        //debug!("{:?}", expr_group);
+                    }
+                    // TODO
+                    // sqlparser::ast::SetExpr::Query(_) => todo!(),
+                    // sqlparser::ast::SetExpr::SetOperation {
+                    //     op,
+                    //     set_quantifier,
+                    //     left,
+                    //     right,
+                    // } => todo!(),
+                    // sqlparser::ast::SetExpr::Values(_) => todo!(),
+                    // sqlparser::ast::SetExpr::Insert(_) => todo!(),
+                    // sqlparser::ast::SetExpr::Update(_) => todo!(),
+                    // sqlparser::ast::SetExpr::Table(_) => todo!(),
+                    _ => debug!("Provided Query is {:?} ", &*query_data.body),
+                }
+            }
+            _ => {
+                debug!(
+                    "Provided statement {:?} doesn't have plans for now",
+                    statement
+                )
+            }
         }
 
+        final_plan_list.push(plan);
         // TODO iterate the AST and do nomalization and pre-processing and create the Plan structure for all expressions
         // explore different combination of plan structure and emit a final plan, which will be sent for physical plan preparation.
 
         Ok(final_plan_list)
     }
 
-    fn init_plan_expr(value: PlanExpr<'_>) -> Result<Edge<PlanGroup>, bool> {
+    fn set_expr_group(value: PlanExpr<'_>) -> Result<Edge<PlanGroup>, bool> {
         let expr_grp = Rc::new(RefCell::new(PlanGroup {
             exprs: vec![],
             best_expr: None,
@@ -471,13 +514,12 @@ impl NaadanQueryEngine {
     fn process_select_query(
         self: &Self,
         select_query: &Box<sqlparser::ast::Select>,
-    ) -> Result<Vec<Edge<PlanGroup>>, bool> {
+    ) -> Result<Vec<Edge<PlanGroup>>, NaadanError> {
         let mut plan_group_list: Vec<Edge<PlanGroup>> = vec![];
         for table in select_query.from.iter() {
             match &table.relation {
                 TableFactor::Table { name, .. } => {
                     let table_name = &name.0.first().unwrap().value;
-                    let table_id: u16;
                     let table_schema: Table;
                     {
                         let storage_instance = task::block_in_place(move || {
@@ -488,12 +530,10 @@ impl NaadanQueryEngine {
 
                         match storage_instance.get_table_details(table_name) {
                             Ok(table_catalog) => {
-                                table_id = table_catalog.id;
                                 table_schema = table_catalog.clone();
                             }
-                            Err(_) => {
-                                debug!(" Invalid Table {}", table_name);
-                                return Err(false);
+                            Err(err) => {
+                                return Err(err);
                             }
                         }
                     }
@@ -508,7 +548,7 @@ impl NaadanQueryEngine {
                         }),
                     });
 
-                    let expr_group = Self::init_plan_expr(value).unwrap();
+                    let expr_group = Self::set_expr_group(value).unwrap();
                     plan_group_list.push(expr_group);
                 }
                 // TODO
@@ -543,7 +583,7 @@ impl NaadanQueryEngine {
                             }),
                         });
 
-                        let expr_group = Self::init_plan_expr(value).unwrap();
+                        let expr_group = Self::set_expr_group(value).unwrap();
                         plan_group_list.push(expr_group);
                     }
                     _ => {}
@@ -559,7 +599,7 @@ impl NaadanQueryEngine {
         Ok(plan_group_list)
     }
 
-    pub fn execute<'a>(&self, physical_plan: Vec<PhysicalPlan>) -> Result<Vec<u8>, bool> {
+    pub fn execute<'a>(&self, physical_plan: Vec<PhysicalPlan>) -> Result<Vec<u8>, NaadanError> {
         debug!("Executing final query plan.");
 
         // TODO let the scheduler decide how and where the execution will take place.
@@ -573,9 +613,13 @@ impl NaadanQueryEngine {
         let mut query_result = String::new();
         match exec_context.last_result {
             Some(res) => {
-                for r in res.rows {
-                    r.iter()
-                        .for_each(|val| query_result += format!(" {}", val.to_string()).as_str());
+                res.rows.iter().for_each(|r| {
+                    let rr: Vec<String> = r.iter().map(|val| val.to_string()).collect();
+                    query_result += rr.join(", ").as_str()
+                });
+
+                if res.rows.len() > 0 {
+                    query_result += "\n\n";
                 }
             }
             None => {}
@@ -585,14 +629,20 @@ impl NaadanQueryEngine {
 
         if exec_context.last_op_status.unwrap_or(true) {
             Ok(format!(
-                "{:?}\n\n
-                Plan executed success in {:.3}ms",
+                "{}Query execution succeeded in {:.3}ms",
                 query_result,
                 elapsed_time.as_micros() as f64 / 1000.0
             )
             .into())
         } else {
-            Err(false)
+            Err(NaadanError::QueryExecutionFailed)
         }
     }
+}
+
+#[inline(always)]
+fn add_error_msg(result: &mut Vec<Vec<u8>>, err: NaadanError) {
+    result.append(&mut vec![format!("Query execution failed: {}", err)
+        .as_bytes()
+        .to_vec()]);
 }

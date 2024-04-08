@@ -1,5 +1,5 @@
 use libnaadandb::server::{NaadanServer, ServerConfig};
-use log::{info};
+use log::info;
 
 #[tokio::main]
 async fn main() {
