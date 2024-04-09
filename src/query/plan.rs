@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::{Rc, Weak},
     time::Duration,
 };
@@ -15,13 +15,25 @@ pub type Edge<T> = Rc<RefCell<T>>;
 type WeakEdge<T> = Weak<RefCell<T>>;
 
 #[derive(Debug, Clone)]
+pub enum ScanType {
+    WildCardScan,
+    Explicit(HashSet<String>),
+}
+
+#[derive(Debug, Clone)]
 pub struct ScanExpr {
     pub schema: Table,
+    pub predicate: Option<ScalarExprType>,
+    pub op: ScanType,
 }
 
 impl ScanExpr {
-    pub fn new(schema: Table) -> Self {
-        Self { schema }
+    pub fn new(schema: Table, predicate: Option<ScalarExprType>, op: ScanType) -> Self {
+        Self {
+            schema,
+            predicate,
+            op,
+        }
     }
 }
 
@@ -49,8 +61,12 @@ pub enum RelationalExprType<'a> {
     IndexScanExpr { index_id: u32 },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ScalarExprType {
+    NEq {
+        left: Box<ScalarExprType>,
+        right: Box<ScalarExprType>,
+    },
     Eq {
         left: Box<ScalarExprType>,
         right: Box<ScalarExprType>,
