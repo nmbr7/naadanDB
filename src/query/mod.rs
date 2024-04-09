@@ -1,12 +1,15 @@
-use sqlparser::{ast::Statement, parser::ParserError};
+use sqlparser::ast::Statement;
 
 use crate::storage::NaadanError;
 
 use self::parser::NaadanParser;
 
+mod kernel;
 pub mod parser;
 pub mod plan;
 pub mod query_engine;
+
+mod utils;
 
 #[derive(Debug)]
 pub struct NaadanQuery {

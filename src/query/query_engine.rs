@@ -1,11 +1,13 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::query::kernel::{create_table, insert_table, scan_table};
 use crate::query::plan::*;
-use crate::storage::catalog::{self, Column, ColumnType, Offset, Table};
+use crate::query::utils::{add_error_msg, prepare_query_output};
+use crate::storage::catalog::{Column, ColumnType, Offset, Table};
 use crate::storage::{NaadanError, StorageEngine};
 
 use log::{debug, error};
@@ -22,7 +24,7 @@ pub struct ExecContext {
     last_op_time: Option<Duration>,
     last_op_status: Option<bool>,
 
-    pub storage_engine: Option<Arc<Mutex<Box<dyn StorageEngine + Send>>>>,
+    pub storage_engine: Option<Arc<Mutex<Box<dyn StorageEngine>>>>,
 }
 
 impl ExecContext {
@@ -40,150 +42,28 @@ impl ExecContext {
         self.last_result.as_ref()
     }
 
-    pub fn set_storage_engine(
-        &mut self,
-        storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>,
-    ) {
+    pub fn set_storage_engine(&mut self, storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>) {
         self.storage_engine = Some(storage_engine);
     }
-    pub fn get_storage_engine(&mut self) -> Option<&Arc<Mutex<Box<dyn StorageEngine + Send>>>> {
+    pub fn get_storage_engine(&mut self) -> Option<&Arc<Mutex<Box<dyn StorageEngine>>>> {
         self.storage_engine.as_ref()
     }
-}
 
-fn insert_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
-    debug!("insert into table");
-    let mut error = false;
-    let mut invalid_type = false;
-
-    match physical_plan {
-        PhysicalPlanExpr::Relational(val) => match val {
-            RelationalExprType::InsertExpr(expr) => {
-                {
-                    let mut storage_instance = task::block_in_place(|| {
-                        println!("Locking storage_instance {:?}", SystemTime::now());
-                        exec_context.get_storage_engine().unwrap().blocking_lock()
-                        // do some compute-heavy work or call synchronous code
-                    });
-
-                    match storage_instance.get_table_details(&expr.table_name) {
-                        Ok(val) => {
-                            // TODO check row constraints, and procceed only if there are no conflict.
-                            debug!("Inserting into Table '{}'", &expr.table_name);
-                            storage_instance
-                                .write_table_rows(expr.columns, &val)
-                                .unwrap();
-                            error = false;
-                        }
-                        Err(_) => error = false,
-                    }
-                }
-            }
-            _ => invalid_type = true,
-        },
-        _ => invalid_type = true,
+    pub fn set_last_result(&mut self, last_result: Option<Values>) {
+        self.last_result = last_result;
     }
 
-    if error {
-        exec_context.last_op_status = Some(false);
-        if invalid_type {
-            error!("Create table with wrong expr type ");
-        }
-    } else {
-        exec_context.last_op_status = Some(true);
-    }
-}
-
-fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
-    debug!("creating table");
-
-    let mut error = false;
-    let mut invalid_type = false;
-
-    match physical_plan {
-        PhysicalPlanExpr::Relational(val) => match val {
-            RelationalExprType::CreateTableExpr(expr) => {
-                let mut table = catalog::Table {
-                    name: expr.table_name,
-                    schema: expr.columns,
-                    indexes: HashSet::new(),
-                    id: 0,
-                };
-                {
-                    let mut storage_instance = task::block_in_place(|| {
-                        println!("Locking storage_instance {:?}", SystemTime::now());
-                        exec_context.get_storage_engine().unwrap().blocking_lock()
-                        // do some compute-heavy work or call synchronous code
-                    });
-
-                    match storage_instance.get_table_details(&table.name) {
-                        Ok(_) => {
-                            debug!("Table '{}' already exists", &table.name);
-                            error = true;
-                        }
-                        Err(_) => {
-                            storage_instance.add_table_details(&mut table).unwrap();
-                        }
-                    }
-                }
-            }
-            _ => invalid_type = true,
-        },
-        _ => invalid_type = true,
-    }
-
-    if error {
-        exec_context.last_op_status = Some(false);
-        if invalid_type {
-            error!("Create table with wrong expr type ");
-        }
-    } else {
-        exec_context.last_op_status = Some(true);
-    }
-}
-
-fn scan_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
-    debug!("scaning table");
-
-    let mut error = false;
-    let mut invalid_type = false;
-    let result: Values;
-
-    match physical_plan {
-        PhysicalPlanExpr::Relational(val) => match val {
-            RelationalExprType::ScanExpr(expr) => {
-                {
-                    let mut storage_instance = task::block_in_place(|| {
-                        println!("Locking storage_instance {:?}", SystemTime::now());
-                        exec_context.get_storage_engine().unwrap().blocking_lock()
-                        // do some compute-heavy work or call synchronous code
-                    });
-
-                    result = storage_instance.read_table_rows(&[1], &expr.schema).unwrap();
-                }
-                exec_context.last_result = Some(result);
-            }
-            _ => invalid_type = true,
-        },
-        _ => invalid_type = true,
-    }
-
-    if error {
-        exec_context.last_op_status = Some(false);
-        if invalid_type {
-            error!("select table with wrong expr type ");
-        }
-    } else {
-        exec_context.last_op_status = Some(true);
+    pub fn set_last_op_status(&mut self, last_op_status: Option<bool>) {
+        self.last_op_status = last_op_status;
     }
 }
 
 pub struct NaadanQueryEngine {
-    pub storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>,
+    pub storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>,
 }
 
 impl NaadanQueryEngine {
-    pub async fn init(storage_engine: Arc<Mutex<Box<dyn StorageEngine + Send>>>) -> Self {
+    pub async fn init(storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>) -> Self {
         Self {
             storage_engine: storage_engine,
         }
@@ -192,15 +72,18 @@ impl NaadanQueryEngine {
     pub async fn process_query(&self, query: NaadanQuery) -> Vec<u8> {
         let mut result: Vec<Vec<u8>> = Vec::new();
         for statement in query.ast.iter() {
+            let query_str = statement.to_string();
+
+            debug!("Processing query: {}", query_str);
+
             result.push(
-                ("## Query: ".to_string() + statement.to_string().as_str())
+                ("## Query: ".to_string() + query_str.as_str())
                     .as_bytes()
                     .to_vec(),
             );
-            // Create logical plan for the query from the AST
-            let lp_result = self.prepare_logical_plan(statement).await;
 
-            let logical_plan = match lp_result {
+            // Create logical plan for the query from the AST
+            let logical_plan = match self.prepare_logical_plan(statement).await {
                 Ok(val) => val,
                 Err(err) => {
                     add_error_msg(&mut result, err);
@@ -210,19 +93,17 @@ impl NaadanQueryEngine {
             debug!("Logical Plan is : {:?}", logical_plan);
 
             // Prepare the physical plan
-            let pp_result = self.prepare_physical_plan(&logical_plan).await;
-            let physical_plan = match pp_result {
+            let physical_plan = match self.prepare_physical_plan(&logical_plan).await {
                 Ok(val) => val,
                 Err(err) => {
                     add_error_msg(&mut result, err);
                     continue;
                 }
             };
+            debug!("Physical Plan is : {:?}", physical_plan);
 
-            // Execute the queries using the physical plan
-            let res = self.execute(physical_plan);
-
-            match res {
+            // Execute the query using the physical plan
+            match self.execute(physical_plan).await {
                 Ok(val) => result.push(val),
                 Err(err) => {
                     add_error_msg(&mut result, err);
@@ -452,7 +333,7 @@ impl NaadanQueryEngine {
                                 return Err(err);
                             }
                         };
-                        debug!("{:#?}", expr_group);
+                        debug!("{:?}", expr_group);
                         let first_vec = expr_group.first().unwrap();
                         let first_expr = Rc::clone(first_vec.borrow().exprs.first().unwrap());
                         plan.plan_expr_root = Some(first_expr);
@@ -540,7 +421,11 @@ impl NaadanQueryEngine {
 
                     debug!(" Select query on Table {}", table_name);
                     let value = PlanExpr::Relational(Relational {
-                        rel_type: RelationalExprType::ScanExpr(ScanExpr::new(table_schema)),
+                        rel_type: RelationalExprType::ScanExpr(ScanExpr::new(
+                            table_schema,
+                            None,
+                            ScanType::WildCardScan,
+                        )),
                         group: None,
                         stats: Some(Stats {
                             estimated_row_count: 0,
@@ -599,31 +484,23 @@ impl NaadanQueryEngine {
         Ok(plan_group_list)
     }
 
-    pub fn execute<'a>(&self, physical_plan: Vec<PhysicalPlan>) -> Result<Vec<u8>, NaadanError> {
+    pub async fn execute<'a>(
+        &self,
+        physical_plan: Vec<PhysicalPlan<'a>>,
+    ) -> Result<Vec<u8>, NaadanError> {
         debug!("Executing final query plan.");
 
         // TODO let the scheduler decide how and where the execution will take place.
         let mut exec_context = ExecContext::init();
         exec_context.set_storage_engine(self.storage_engine.clone());
+
         let now = Instant::now();
+
         for plan in physical_plan {
             (plan.plane_exec_fn)(&mut exec_context, plan.plan_expr);
         }
 
-        let mut query_result = String::new();
-        match exec_context.last_result {
-            Some(res) => {
-                res.rows.iter().for_each(|r| {
-                    let rr: Vec<String> = r.iter().map(|val| val.to_string()).collect();
-                    query_result += rr.join(", ").as_str()
-                });
-
-                if res.rows.len() > 0 {
-                    query_result += "\n\n";
-                }
-            }
-            None => {}
-        }
+        let query_result = prepare_query_output(exec_context.last_result);
 
         let elapsed_time = now.elapsed();
 
@@ -638,11 +515,4 @@ impl NaadanQueryEngine {
             Err(NaadanError::QueryExecutionFailed)
         }
     }
-}
-
-#[inline(always)]
-fn add_error_msg(result: &mut Vec<Vec<u8>>, err: NaadanError) {
-    result.append(&mut vec![format!("Query execution failed: {}", err)
-        .as_bytes()
-        .to_vec()]);
 }

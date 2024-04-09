@@ -1,11 +1,15 @@
 pub mod catalog;
+mod fs;
 pub mod page;
 pub mod storage_engine;
-
 mod utils;
 
-use sqlparser::ast::Values;
+use std::collections::HashMap;
+
+use sqlparser::ast::{Expr, Values};
 use thiserror::Error;
+
+use crate::query::plan::ScalarExprType;
 
 use self::catalog::Table;
 
@@ -33,6 +37,9 @@ pub enum NaadanError {
     #[error("Query execution failed")]
     QueryExecutionFailed,
 
+    #[error("File system operation failed")]
+    FileSystemError(#[from] std::io::Error),
+
     #[error("Unknown server error")]
     Unknown,
 }
@@ -40,20 +47,45 @@ pub enum NaadanError {
 pub type RowIdType = usize;
 pub type TableIdType = usize;
 
-pub trait StorageEngine: std::fmt::Debug {
+/// Trait interface for DB schema operations.
+pub trait CatalogEngine {
     /// Add table into the DB catalog
     fn add_table_details(&mut self, table: &mut Table) -> Result<TableIdType, NaadanError>;
 
     /// Get table details from the DB catalog
     fn get_table_details(&self, name: &String) -> Result<Table, NaadanError>;
 
+    /// Delete table details from the DB catalog
+    fn delete_table_details(&self, name: &String) -> Result<Table, NaadanError>;
+}
+
+/// Trait interface for all storage operations.
+pub trait StorageEngine: CatalogEngine + std::fmt::Debug + Send {
     /// Insert new rows into a table
     fn write_table_rows(
         &mut self,
         row_values: Values,
-        table: &Table,
+        schema: &Table,
     ) -> Result<RowIdType, NaadanError>;
 
     /// Retrieve rows from a table
-    fn read_table_rows(&self, row_id: &[usize], schema: &Table) -> Result<Values, NaadanError>;
+    fn read_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<Values, NaadanError>;
+
+    /// Retrieve rows from a table
+    fn scan_table(
+        &self,
+        predicate: Option<ScalarExprType>,
+        schema: &Table,
+    ) -> Result<Values, NaadanError>;
+
+    /// Delete rows from a table
+    fn delete_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<Values, NaadanError>;
+
+    /// Update rows from a table
+    fn update_table_rows(
+        &mut self,
+        row_ids: &[usize],
+        updates_columns: HashMap<&str, Expr>,
+        schema: &Table,
+    ) -> Result<&[RowIdType], NaadanError>;
 }
