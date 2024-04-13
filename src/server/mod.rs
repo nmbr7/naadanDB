@@ -54,7 +54,7 @@ impl NaadanServer {
 
             tokio::spawn(async move {
                 match Self::process_request(server_instance_clone, socket, n).await {
-                    Ok(_) => debug!("Request processing done"),
+                    Ok(_) => println!("Request processing done"),
                     Err(_) => error!("Request processing failed"),
                 }
             });
@@ -69,7 +69,7 @@ impl NaadanServer {
         info!("Got new request from IP: {:?}", socket.peer_addr());
 
         let buffer: &mut Vec<u8> = &mut Vec::new();
-        let result: Vec<u8>;
+        let mut result: Vec<u8> = vec![];
         let sql_statement = match get_query_from_request(&mut socket, buffer).await {
             Ok(value) => value,
             Err(err) => {
@@ -78,22 +78,34 @@ impl NaadanServer {
             }
         };
 
-        // Init and parse the query string to AST
-        let sql_query = match NaadanQuery::init(sql_statement.to_string()) {
-            Ok(res) => res,
-            Err(err) => {
-                socket.write(err.to_string().as_bytes()).await.unwrap();
-                return Ok(());
+        {
+            // Init and parse the query string to AST
+            let sql_query = match NaadanQuery::init(sql_statement.to_string()) {
+                Ok(res) => res,
+                Err(err) => {
+                    socket.write(err.to_string().as_bytes()).await.unwrap();
+                    return Ok(());
+                }
+            };
+
+            // Init a new query engine instance with reference to the global shared storage engine
+            let query_engine =
+                NaadanQueryEngine::init(server_instance.storage_engine.clone()).await;
+
+            // Process the sql query.
+            let query_results = query_engine.process_query(sql_query).await;
+
+            for query_result in query_results {
+                match query_result {
+                    Ok(val) => result.append(&mut val.to_string().as_bytes().to_vec()),
+                    Err(err) => result.append(
+                        &mut format!("Query execution failed: {}", err)
+                            .as_bytes()
+                            .to_vec(),
+                    ),
+                }
             }
-        };
-
-        // Create a reference to the shared storage engine
-        let storage_engine_instance = server_instance.storage_engine.clone();
-
-        let query_engine = NaadanQueryEngine::init(storage_engine_instance).await;
-
-        // Process the sql query.
-        result = query_engine.process_query(sql_query).await;
+        }
 
         socket.write(&result).await.unwrap();
 
@@ -113,16 +125,16 @@ async fn get_query_from_request<'a>(
     loop {
         let bytes = socket.read_buf(buffer).await.unwrap();
         if 0 == bytes {
-            debug!("Read zero bytes from server");
+            println!("Read zero bytes from server");
             return Err(NaadanError::Unknown);
         }
 
         count += bytes;
 
-        //debug!("Bytes: {:?}", buffer);
+        //println!("Bytes: {:?}", buffer);
         if buffer.as_slice()[(count - 4)..count] == b"EOF\n".to_vec() {
             if buffer.len() <= 5 {
-                debug!("Empty query received");
+                println!("Empty query received");
                 return Err(NaadanError::Unknown);
             }
             break;
