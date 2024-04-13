@@ -15,7 +15,7 @@ use std::{
     vec,
 };
 
-use crate::{helper::log, storage::utils::write_string_to_buf};
+use crate::{query::RecordSet, storage::utils::write_string_to_buf, utils::log};
 
 const DB_DATAFILE: &str = "/tmp/DB_data_file.bin";
 const DB_TABLE_CATALOG_FILE: &str = "/tmp/DB_table_catalog_file.bin";
@@ -213,7 +213,7 @@ impl CatalogPage for Page {
     }
 
     fn write_table_details(&mut self, table: &Table) -> Result<usize, NaadanError> {
-        debug!("Creating new table with details {:?}", table);
+        println!("Creating new table with details {:?}", table);
         let split_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
         let data = &mut self.data;
 
@@ -417,7 +417,7 @@ impl Page {
     pub fn write_table_row(
         &mut self,
         mut row_id: u32,
-        row_data: Values,
+        row_data: RecordSet,
         schema: &Table,
     ) -> Result<usize, NaadanError> {
         log(format!("Writing row {} to page", row_id));
@@ -425,7 +425,7 @@ impl Page {
         //       then remove the dynamic sized buffer space.
         let var_len_buf_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
 
-        //debug!("Page Data {:?}", self.data);
+        //println!("Page Data {:?}", self.data);
         let data = &mut self.data;
 
         let mut buf_cursor = Cursor::new(&mut data.data);
@@ -439,7 +439,7 @@ impl Page {
         buf_cursor.set_position(self.header.last_offset as u64);
 
         // TODO: check the available space
-        for row in row_data.rows {
+        for row in row_data {
             for (index, column) in row.iter().enumerate() {
                 data.offset
                     .insert(index as u32, buf_cursor.position() as u32);
@@ -449,7 +449,7 @@ impl Page {
                     return value;
                 }
             }
-            debug!("Done inserting row {}", row_id);
+            println!("Done inserting row {}", row_id);
             self.header
                 .offset
                 .insert(row_id as u32, self.header.last_offset as u32);
@@ -518,7 +518,7 @@ impl Page {
                 ColumnType::Binary => {}
                 ColumnType::DateTime => {}
             }
-            debug!("Col vec {:?}", row);
+            println!("Col vec {:?}", row);
         }
 
         Ok(row.iter().map(|val| val.1.clone()).collect::<Vec<Expr>>())
@@ -571,7 +571,7 @@ impl Page {
             .open(table_data_file.clone())
         {
             Ok(mut file) => {
-                debug!(
+                println!(
                     "Page Index is :{}\nPage offset is at {}",
                     page_id.get_page_index(),
                     page_id.get_page_index() as u64 * 8 * 1024
@@ -661,7 +661,7 @@ fn write_column_value(
             _ => {}
         },
         _ => {
-            debug!("Table insert source is not explicit values.");
+            println!("Table insert source is not explicit values.");
             return Some(Err(NaadanError::RowAddFailed));
         }
     }

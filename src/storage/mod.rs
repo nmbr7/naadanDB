@@ -6,10 +6,10 @@ mod utils;
 
 use std::collections::HashMap;
 
-use sqlparser::ast::{Expr, Values};
+use sqlparser::ast::Expr;
 use thiserror::Error;
 
-use crate::query::plan::ScalarExprType;
+use crate::query::{plan::ScalarExprType, RecordSet};
 
 use self::catalog::Table;
 
@@ -64,22 +64,26 @@ pub trait StorageEngine: CatalogEngine + std::fmt::Debug + Send {
     /// Insert new rows into a table
     fn write_table_rows(
         &mut self,
-        row_values: Values,
+        row_values: RecordSet,
         schema: &Table,
     ) -> Result<RowIdType, NaadanError>;
 
     /// Retrieve rows from a table
-    fn read_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<Values, NaadanError>;
+    fn read_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<RecordSet, NaadanError>;
 
     /// Retrieve rows from a table
     fn scan_table(
         &self,
         predicate: Option<ScalarExprType>,
         schema: &Table,
-    ) -> Result<Values, NaadanError>;
+    ) -> Result<RecordSet, NaadanError>;
 
     /// Delete rows from a table
-    fn delete_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<Values, NaadanError>;
+    fn delete_table_rows(
+        &self,
+        row_ids: &[usize],
+        schema: &Table,
+    ) -> Result<RecordSet, NaadanError>;
 
     /// Update rows from a table
     fn update_table_rows(

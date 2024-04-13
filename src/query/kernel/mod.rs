@@ -4,12 +4,15 @@ use log::{debug, error};
 use sqlparser::ast::Values;
 use tokio::task;
 
-use crate::{query::plan::RelationalExprType, storage::catalog};
+use crate::{
+    query::{plan::RelationalExprType, RecordSet},
+    storage::catalog,
+};
 
 use super::{plan::PhysicalPlanExpr, query_engine::ExecContext};
 
 pub fn insert_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
-    debug!("insert into table");
+    println!("insert into table");
     let mut error = false;
     let mut invalid_type = false;
 
@@ -26,10 +29,8 @@ pub fn insert_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanE
                     match storage_instance.get_table_details(&expr.table_name) {
                         Ok(val) => {
                             // TODO check row constraints, and procceed only if there are no conflict.
-                            debug!("Inserting into Table '{}'", &expr.table_name);
-                            storage_instance
-                                .write_table_rows(expr.columns, &val)
-                                .unwrap();
+                            println!("Inserting into Table '{}'", &expr.table_name);
+                            storage_instance.write_table_rows(expr.rows, &val).unwrap();
                             error = false;
                         }
                         Err(_) => error = false,
@@ -52,7 +53,7 @@ pub fn insert_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanE
 }
 
 pub fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
-    debug!("creating table");
+    println!("creating table");
 
     let mut error = false;
     let mut invalid_type = false;
@@ -75,7 +76,7 @@ pub fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanE
 
                     match storage_instance.get_table_details(&table.name) {
                         Ok(_) => {
-                            debug!("Table '{}' already exists", &table.name);
+                            println!("Table '{}' already exists", &table.name);
                             error = true;
                         }
                         Err(_) => {
@@ -100,11 +101,11 @@ pub fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanE
 }
 
 pub fn scan_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
-    debug!("scaning table");
+    println!("scaning table");
 
     let mut error = false;
     let mut invalid_type = false;
-    let result: Values;
+    let result: RecordSet;
 
     match physical_plan {
         PhysicalPlanExpr::Relational(val) => match val {

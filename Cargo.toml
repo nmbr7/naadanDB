@@ -17,6 +17,9 @@ rand = "0.8"
 stats_alloc = "0.1.10"
 thiserror = "1.0"
 
+[dev-dependencies]
+tokio-test = "*"
+
 [lib]
 name = "libnaadandb"
 path = "src/lib.rs"

@@ -8,7 +8,7 @@ use sqlparser::{
 pub struct NaadanParser;
 impl NaadanParser {
     pub fn parse(query: &str) -> Result<Vec<Statement>, ParserError> {
-        debug!(
+        println!(
             "\n ==============\nParsing query {:?} Started\n ==============",
             query
         );
@@ -16,8 +16,8 @@ impl NaadanParser {
         let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
         let ast = Parser::parse_sql(&dialect, query)?;
 
-        debug!("Parsed AST is {:?}\n", ast);
-        debug!(
+        println!("Parsed AST is {:?}\n", ast);
+        println!(
             "\n ==============\nParsing query {:?} Finished\n ==============",
             query
         );

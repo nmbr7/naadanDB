@@ -1,12 +1,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::query::kernel::{create_table, insert_table, scan_table};
 use crate::query::plan::*;
-use crate::query::utils::{add_error_msg, prepare_query_output};
 use crate::storage::catalog::{Column, ColumnType, Offset, Table};
 use crate::storage::{NaadanError, StorageEngine};
 
@@ -16,10 +16,70 @@ use sqlparser::ast::{SetExpr, Statement, TableFactor, Values};
 use tokio::sync::Mutex;
 use tokio::task;
 
-use super::NaadanQuery;
+use super::{NaadanQuery, RecordSet};
 
+/// Execution statistics for a query
+#[derive(Debug, Clone)]
+pub struct ExecStats {
+    begin_time: SystemTime,
+    exec_time: Duration,
+}
+
+impl ExecStats {
+    pub fn new(begin_time: SystemTime, exec_time: Duration) -> Self {
+        Self {
+            begin_time,
+            exec_time,
+        }
+    }
+}
+
+/// Final query result for a sql query execution
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    query_str: Option<String>,
+    exec_stats: ExecStats,
+    result: Option<RecordSet>,
+}
+
+impl QueryResult {
+    pub fn new(exec_stats: ExecStats, result: Option<RecordSet>, query: Option<String>) -> Self {
+        Self {
+            exec_stats,
+            result,
+            query_str: query,
+        }
+    }
+}
+
+impl fmt::Display for QueryResult {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let query = match self.query_str.as_ref() {
+            Some(val) => format!("## Query: {}\n", val),
+            None => "".to_string(),
+        };
+
+        match self.result.as_ref() {
+            Some(val) => write!(
+                f,
+                "{}{}Query execution succeeded in {:.3}ms",
+                query,
+                val.to_string(),
+                self.exec_stats.exec_time.as_micros() as f64 / 1000.0,
+            ),
+            None => write!(
+                f,
+                "{}Query execution succeeded in {:.3}ms",
+                query,
+                self.exec_stats.exec_time.as_micros() as f64 / 1000.0,
+            ),
+        }
+    }
+}
+
+/// Execution context for the physical plan executor
 pub struct ExecContext {
-    last_result: Option<Values>,
+    last_result: Option<RecordSet>,
     last_op_name: Option<String>,
     last_op_time: Option<Duration>,
     last_op_status: Option<bool>,
@@ -38,7 +98,7 @@ impl ExecContext {
         }
     }
 
-    pub fn last_result(&self) -> Option<&Values> {
+    pub fn last_result(&self) -> Option<&RecordSet> {
         self.last_result.as_ref()
     }
 
@@ -49,7 +109,7 @@ impl ExecContext {
         self.storage_engine.as_ref()
     }
 
-    pub fn set_last_result(&mut self, last_result: Option<Values>) {
+    pub fn set_last_result(&mut self, last_result: Option<RecordSet>) {
         self.last_result = last_result;
     }
 
@@ -58,61 +118,87 @@ impl ExecContext {
     }
 }
 
+/// The core query engine struct
+/// - It takes a reference to the global reference counted storage engine instance
 pub struct NaadanQueryEngine {
     pub storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>,
 }
 
 impl NaadanQueryEngine {
+    /// Initialize the query engine with the shared storage engine instance
     pub async fn init(storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>) -> Self {
         Self {
             storage_engine: storage_engine,
         }
     }
 
-    pub async fn process_query(&self, query: NaadanQuery) -> Vec<u8> {
-        let mut result: Vec<Vec<u8>> = Vec::new();
+    /// Process the sql query AST
+    pub async fn process_query(&self, query: NaadanQuery) -> Vec<Result<QueryResult, NaadanError>> {
+        let mut result: Vec<Result<QueryResult, NaadanError>> = Vec::new();
+
         for statement in query.ast.iter() {
-            let query_str = statement.to_string();
-
-            debug!("Processing query: {}", query_str);
-
-            result.push(
-                ("## Query: ".to_string() + query_str.as_str())
-                    .as_bytes()
-                    .to_vec(),
-            );
-
-            // Create logical plan for the query from the AST
-            let logical_plan = match self.prepare_logical_plan(statement).await {
-                Ok(val) => val,
-                Err(err) => {
-                    add_error_msg(&mut result, err);
-                    continue;
-                }
-            };
-            debug!("Logical Plan is : {:?}", logical_plan);
-
-            // Prepare the physical plan
-            let physical_plan = match self.prepare_physical_plan(&logical_plan).await {
-                Ok(val) => val,
-                Err(err) => {
-                    add_error_msg(&mut result, err);
-                    continue;
-                }
-            };
-            debug!("Physical Plan is : {:?}", physical_plan);
-
-            // Execute the query using the physical plan
-            match self.execute(physical_plan).await {
-                Ok(val) => result.push(val),
-                Err(err) => {
-                    add_error_msg(&mut result, err);
-                    continue;
-                }
+            if let Some(value) = self.process_query_statement(statement).await {
+                result.push(value);
             }
         }
 
-        result.join("\n\n".as_bytes())
+        result
+    }
+
+    async fn process_query_statement(
+        &self,
+        statement: &Statement,
+    ) -> Option<Result<QueryResult, NaadanError>> {
+        let query_str = statement.to_string();
+        println!("Processing query: {}", query_str);
+
+        // Create logical plan for the query from the AST
+        let logical_plan = match self.prepare_logical_plan(statement).await {
+            Ok(val) => val,
+            Err(err) => return Some(Err(err)),
+        };
+        println!("Logical Plan is : {:?}", logical_plan);
+
+        // Prepare the physical plan
+        let physical_plan = match self.prepare_physical_plan(&logical_plan).await {
+            Ok(val) => val,
+            Err(err) => return Some(Err(err)),
+        };
+        println!("Physical Plan is : {:?}", physical_plan);
+
+        // Execute the query using the physical plan
+        Some(self.execute(physical_plan).await)
+    }
+
+    /// Execute the physical query plan.
+    pub async fn execute<'a>(
+        &self,
+        physical_plan: Vec<PhysicalPlan<'a>>,
+    ) -> Result<QueryResult, NaadanError> {
+        println!("Executing final query plan.");
+
+        // TODO let the scheduler decide how and where the execution will take place.
+        let mut exec_context = ExecContext::init();
+        exec_context.set_storage_engine(self.storage_engine.clone());
+
+        let begin_time = SystemTime::now();
+        let now = Instant::now();
+
+        for plan in physical_plan {
+            (plan.plane_exec_fn)(&mut exec_context, plan.plan_expr);
+        }
+
+        let elapsed_time = now.elapsed();
+
+        if exec_context.last_op_status.unwrap_or(true) {
+            Ok(QueryResult::new(
+                ExecStats::new(begin_time, elapsed_time),
+                exec_context.last_result,
+                None,
+            ))
+        } else {
+            Err(NaadanError::QueryExecutionFailed)
+        }
     }
 
     async fn prepare_physical_plan<'a>(
@@ -167,7 +253,7 @@ impl NaadanQueryEngine {
             None => todo!(),
         }
 
-        debug!("Physical_plan prepared.");
+        println!("Physical_plan prepared.");
         Ok(exec_vec)
     }
 
@@ -194,21 +280,18 @@ impl NaadanQueryEngine {
                 let mut column_map: HashMap<String, Column> = HashMap::new();
                 let table_name = name.0.last().unwrap().value.clone();
                 {
-                    let storage_instance = task::block_in_place(move || {
-                        println!("Locking storage_instance {:?}", SystemTime::now());
-                        self.storage_engine.blocking_lock()
-                    });
+                    let storage_instance = self.storage_engine.lock().await;
 
                     match storage_instance.get_table_details(&table_name) {
                         Ok(_) => {
-                            debug!("Table '{}' already exists", &table_name);
+                            println!("Table '{}' already exists", &table_name);
                             return Err(NaadanError::TableAlreadyExists);
                         }
                         Err(_) => {}
                     }
                 }
 
-                debug!("Columns {:?}", columns);
+                println!("Columns {:?}", columns);
                 let mut offset = 0;
                 for col in columns {
                     let mut is_nullable = false;
@@ -232,7 +315,7 @@ impl NaadanQueryEngine {
                         }
                     }
 
-                    debug!("Column offset is {:?}", offset);
+                    println!("Column offset is {:?}", offset);
 
                     column_map.insert(
                         col.name.value.clone(),
@@ -268,7 +351,7 @@ impl NaadanQueryEngine {
                 source,
                 ..
             } => {
-                debug!(
+                println!(
                     "Insert statement, table name is {} with columns {:?} and values {:?}",
                     table_name, columns, source
                 );
@@ -285,7 +368,7 @@ impl NaadanQueryEngine {
                         Ok(table_catalog) => {
                             // TODO: validate the input columns againt the schema
                             let row_values = match &*(source.as_ref().unwrap().body) {
-                                SetExpr::Values(val) => val.clone(),
+                                SetExpr::Values(val) => RecordSet::new(val.rows.clone()),
                                 _ => return Err(NaadanError::LogicalPlanFailed),
                             };
 
@@ -293,7 +376,7 @@ impl NaadanQueryEngine {
                             let local_plan = PlanExpr::Relational(Relational {
                                 rel_type: RelationalExprType::InsertExpr(InsertExpr {
                                     table_name: t_name,
-                                    columns: row_values,
+                                    rows: row_values,
                                 }),
                                 group: None,
                                 stats: None,
@@ -308,7 +391,13 @@ impl NaadanQueryEngine {
                     }
                 }
             }
-            Statement::Update { .. } => {}
+            Statement::Update {
+                table,
+                assignments,
+                from,
+                selection,
+                returning,
+            } => {}
             Statement::Delete { .. } => {}
 
             Statement::StartTransaction { .. } => {}
@@ -325,19 +414,19 @@ impl NaadanQueryEngine {
                 match &*query_data.body {
                     SetExpr::Select(select_query) => {
                         //  Get the query target Tables as in the 'FROM' expression
-                        let result = self.process_select_query(select_query);
+                        let result = self.prepare_select_query_plan(select_query);
                         let expr_group = match result {
                             Ok(val) => val,
                             Err(err) => {
-                                debug!("Query failed with error: {}", err);
+                                println!("Query failed with error: {}", err);
                                 return Err(err);
                             }
                         };
-                        debug!("{:?}", expr_group);
+                        //println!("{:?}", expr_group);
                         let first_vec = expr_group.first().unwrap();
                         let first_expr = Rc::clone(first_vec.borrow().exprs.first().unwrap());
                         plan.plan_expr_root = Some(first_expr);
-                        //debug!("{:?}", expr_group);
+                        //println!("{:?}", expr_group);
                     }
                     // TODO
                     // sqlparser::ast::SetExpr::Query(_) => todo!(),
@@ -351,11 +440,11 @@ impl NaadanQueryEngine {
                     // sqlparser::ast::SetExpr::Insert(_) => todo!(),
                     // sqlparser::ast::SetExpr::Update(_) => todo!(),
                     // sqlparser::ast::SetExpr::Table(_) => todo!(),
-                    _ => debug!("Provided Query is {:?} ", &*query_data.body),
+                    _ => println!("Provided Query is {:?} ", &*query_data.body),
                 }
             }
             _ => {
-                debug!(
+                println!(
                     "Provided statement {:?} doesn't have plans for now",
                     statement
                 )
@@ -369,30 +458,7 @@ impl NaadanQueryEngine {
         Ok(final_plan_list)
     }
 
-    fn set_expr_group(value: PlanExpr<'_>) -> Result<Edge<PlanGroup>, bool> {
-        let expr_grp = Rc::new(RefCell::new(PlanGroup {
-            exprs: vec![],
-            best_expr: None,
-        }));
-
-        let rel_expr = Rc::new(RefCell::new(value));
-
-        // Link the expression with group
-        expr_grp.borrow_mut().exprs.push(Rc::clone(&rel_expr));
-
-        match &mut *rel_expr.borrow_mut() {
-            PlanExpr::Relational(relation) => {
-                let r = Rc::clone(&expr_grp);
-                relation.group = Some(Rc::downgrade(&r));
-            }
-            //PlanExpr::Scalar { rel_type, group } => todo!(),
-            _ => {}
-        };
-
-        Ok(expr_grp)
-    }
-
-    fn process_select_query(
+    fn prepare_select_query_plan(
         self: &Self,
         select_query: &Box<sqlparser::ast::Select>,
     ) -> Result<Vec<Edge<PlanGroup>>, NaadanError> {
@@ -419,7 +485,7 @@ impl NaadanQueryEngine {
                         }
                     }
 
-                    debug!(" Select query on Table {}", table_name);
+                    println!(" Select query on Table {}", table_name);
                     let value = PlanExpr::Relational(Relational {
                         rel_type: RelationalExprType::ScanExpr(ScanExpr::new(
                             table_schema,
@@ -433,7 +499,7 @@ impl NaadanQueryEngine {
                         }),
                     });
 
-                    let expr_group = Self::set_expr_group(value).unwrap();
+                    let expr_group = value.set_expr_group().unwrap();
                     plan_group_list.push(expr_group);
                 }
                 // TODO
@@ -445,7 +511,7 @@ impl NaadanQueryEngine {
                 // sqlparser::ast::TableFactor::NestedJoin { table_with_joins, alias } => todo!(),
                 // sqlparser::ast::TableFactor::Pivot { table, aggregate_function, value_column, pivot_values, alias } => todo!(),
                 // sqlparser::ast::TableFactor::Unpivot { table, value, name, columns, alias } => todo!(),
-                _ => debug!(
+                _ => println!(
                     "Provided 'Select FROM' refers {:?} relation",
                     &table.relation
                 ),
@@ -455,7 +521,7 @@ impl NaadanQueryEngine {
             match projection {
                 sqlparser::ast::SelectItem::UnnamedExpr(expr) => match expr {
                     sqlparser::ast::Expr::Identifier(identifier) => {
-                        debug!("{:?}", identifier.value);
+                        println!("{:?}", identifier.value);
 
                         let value = PlanExpr::Scalar(Scalar {
                             rel_type: ScalarExprType::Identifier {
@@ -468,7 +534,7 @@ impl NaadanQueryEngine {
                             }),
                         });
 
-                        let expr_group = Self::set_expr_group(value).unwrap();
+                        let expr_group = value.set_expr_group().unwrap();
                         plan_group_list.push(expr_group);
                     }
                     _ => {}
@@ -480,39 +546,7 @@ impl NaadanQueryEngine {
             }
         }
 
-        debug!("{:?}", plan_group_list);
+        println!("Select query plan Groups: {:?}", plan_group_list);
         Ok(plan_group_list)
-    }
-
-    pub async fn execute<'a>(
-        &self,
-        physical_plan: Vec<PhysicalPlan<'a>>,
-    ) -> Result<Vec<u8>, NaadanError> {
-        debug!("Executing final query plan.");
-
-        // TODO let the scheduler decide how and where the execution will take place.
-        let mut exec_context = ExecContext::init();
-        exec_context.set_storage_engine(self.storage_engine.clone());
-
-        let now = Instant::now();
-
-        for plan in physical_plan {
-            (plan.plane_exec_fn)(&mut exec_context, plan.plan_expr);
-        }
-
-        let query_result = prepare_query_output(exec_context.last_result);
-
-        let elapsed_time = now.elapsed();
-
-        if exec_context.last_op_status.unwrap_or(true) {
-            Ok(format!(
-                "{}Query execution succeeded in {:.3}ms",
-                query_result,
-                elapsed_time.as_micros() as f64 / 1000.0
-            )
-            .into())
-        } else {
-            Err(NaadanError::QueryExecutionFailed)
-        }
     }
 }

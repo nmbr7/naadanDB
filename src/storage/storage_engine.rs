@@ -7,8 +7,8 @@ use std::{
     ops::{Shl, Shr},
 };
 
-use crate::helper::log;
-use crate::storage::catalog::*;
+use crate::{query::NaadanRecord, storage::catalog::*};
+use crate::{query::RecordSet, utils::log};
 
 use super::{
     page::{CatalogPage, Page, PageData, PageId},
@@ -48,21 +48,21 @@ impl NaadanStorageEngine {
 impl StorageEngine for NaadanStorageEngine {
     fn write_table_rows(
         &mut self,
-        row_values: Values,
+        row_values: RecordSet,
         table: &Table,
     ) -> Result<RowIdType, NaadanError> {
         let mut table_pages: Vec<PageId> = vec![];
         let mut page_id: PageId;
         let mut row_id: u32;
 
-        // debug!("Storage engine: {:?}", self);
+        // println!("Storage engine: {:?}", self);
         let page: &mut Page = match self.table_index.get_mut(&(table.id as usize)) {
             Some(val) => {
                 table_pages.append(&mut val.page_ids.clone());
                 page_id = table_pages.last().unwrap().clone();
                 // TODO: make these updated atomic
                 row_id = val.row_count + 1;
-                val.row_count += row_values.rows.len() as u32;
+                val.row_count += row_values.count() as u32;
                 let page = self.buffer_pool.page_pool.get_mut(&page_id).unwrap();
                 // TODO: check if the page has enough space
                 page
@@ -76,7 +76,7 @@ impl StorageEngine for NaadanStorageEngine {
                     table.id as usize,
                     TableMetadata {
                         page_ids: vec![page_id],
-                        row_count: row_values.rows.len() as u32,
+                        row_count: row_values.count() as u32,
                     },
                 );
                 let page = self.buffer_pool.page_pool.get_mut(&page_id).unwrap();
@@ -91,43 +91,39 @@ impl StorageEngine for NaadanStorageEngine {
             self.row_index.insert(r_id as usize, page_id);
         }
 
-        debug!("{:?}", self.row_index);
+        println!("{:?}", self.row_index);
 
         let read_page = Page::read_from_disk(page_id).unwrap();
         read_page.read_table_row(&(row_id as usize), table).unwrap();
 
-        //debug!("{:?}", page);
+        //println!("{:?}", page);
 
         Ok(row_id as usize)
     }
 
-    fn read_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<Values, NaadanError> {
-        let mut row_collection: Values = Values {
-            explicit_row: true,
-            rows: vec![],
-        };
+    fn read_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<RecordSet, NaadanError> {
+        let mut rows = RecordSet::new(vec![]);
 
         for r_id in row_ids {
             let page_id = match self.row_index.get(r_id) {
                 Some(pageid) => pageid,
-                None => {
-                    return Ok(Values {
-                        explicit_row: true,
-                        rows: vec![],
-                    })
-                }
+                None => return Ok(RecordSet::new(vec![])),
             };
 
             let page = self.buffer_pool.get(&page_id).unwrap();
             let row = page.read_table_row(&r_id, schema).unwrap();
 
-            row_collection.rows.push(row);
+            rows.add_record(row);
         }
 
-        Ok(row_collection)
+        Ok(rows)
     }
 
-    fn delete_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<Values, NaadanError> {
+    fn delete_table_rows(
+        &self,
+        row_ids: &[usize],
+        schema: &Table,
+    ) -> Result<RecordSet, NaadanError> {
         todo!()
     }
 
@@ -156,11 +152,8 @@ impl StorageEngine for NaadanStorageEngine {
         &self,
         predicate: Option<crate::query::plan::ScalarExprType>,
         schema: &Table,
-    ) -> Result<Values, NaadanError> {
-        let mut row_collection: Values = Values {
-            explicit_row: true,
-            rows: vec![],
-        };
+    ) -> Result<RecordSet, NaadanError> {
+        let mut row_collection: RecordSet = RecordSet::new(vec![]);
 
         match self.table_index.get(&(schema.id as usize)) {
             Some(val) => {
@@ -171,7 +164,7 @@ impl StorageEngine for NaadanStorageEngine {
                     // TODO: push down predicate
                     let row = page.read_table_row(&(r_id as usize), schema).unwrap();
 
-                    row_collection.rows.push(row);
+                    row_collection.add_record(row);
                 }
             }
             _ => return Err(NaadanError::TableNotFound),

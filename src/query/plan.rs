@@ -9,7 +9,7 @@ use sqlparser::ast::Values;
 
 use crate::storage::catalog::{Column, Table};
 
-use super::query_engine::ExecContext;
+use super::{query_engine::ExecContext, RecordSet};
 
 pub type Edge<T> = Rc<RefCell<T>>;
 type WeakEdge<T> = Weak<RefCell<T>>;
@@ -46,7 +46,7 @@ pub struct CreateTableExpr {
 #[derive(Debug, Clone)]
 pub struct InsertExpr {
     pub table_name: String,
-    pub columns: Values,
+    pub rows: RecordSet,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +132,31 @@ pub struct Scalar<'a> {
 pub enum PlanExpr<'a> {
     Relational(Relational<'a>),
     Scalar(Scalar<'a>),
+}
+
+impl<'a> PlanExpr<'a> {
+    pub fn set_expr_group(self) -> Result<Edge<PlanGroup<'a>>, bool> {
+        let expr_grp = Rc::new(RefCell::new(PlanGroup {
+            exprs: vec![],
+            best_expr: None,
+        }));
+
+        let rel_expr = Rc::new(RefCell::new(self));
+
+        // Link the expression with group
+        expr_grp.borrow_mut().exprs.push(Rc::clone(&rel_expr));
+
+        match &mut *rel_expr.borrow_mut() {
+            PlanExpr::Relational(relation) => {
+                let r = Rc::clone(&expr_grp);
+                relation.group = Some(Rc::downgrade(&r));
+            }
+            //PlanExpr::Scalar { rel_type, group } => todo!(),
+            _ => {}
+        };
+
+        Ok(expr_grp)
+    }
 }
 
 #[derive(Debug)]
