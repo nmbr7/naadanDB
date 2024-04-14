@@ -88,8 +88,8 @@ pub trait StorageEngine: CatalogEngine + std::fmt::Debug + Send {
     /// Update rows from a table
     fn update_table_rows(
         &mut self,
-        row_ids: &[usize],
-        updates_columns: HashMap<&str, Expr>,
+        row_ids: Option<Vec<usize>>,
+        updates_columns: HashMap<String, Expr>,
         schema: &Table,
     ) -> Result<&[RowIdType], NaadanError>;
 }

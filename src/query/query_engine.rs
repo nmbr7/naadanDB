@@ -5,13 +5,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::query::kernel::{create_table, insert_table, scan_table};
-use crate::query::plan::*;
+use crate::query::kernel::{create_table, insert_table, scan_table, update_table};
+use crate::query::plan::{IndexScanExpr, *};
 use crate::storage::catalog::{Column, ColumnType, Offset, Table};
 use crate::storage::{NaadanError, StorageEngine};
 
 use log::{debug, error};
-use sqlparser::ast::{SetExpr, Statement, TableFactor, Values};
+use sqlparser::ast::{Expr, SetExpr, Statement, TableFactor, Values};
 
 use tokio::sync::Mutex;
 use tokio::task;
@@ -211,40 +211,34 @@ impl NaadanQueryEngine {
             Some(plan) => {
                 let root_exp = plan.plan_expr_root.as_ref().unwrap().borrow();
                 match &*root_exp {
-                    PlanExpr::Relational(val) => match &val.rel_type {
-                        RelationalExprType::ScanExpr(val) => {
-                            let physical_plan_expr: PhysicalPlanExpr<'a> =
-                                PhysicalPlanExpr::Relational(RelationalExprType::ScanExpr(
-                                    val.clone(),
-                                ));
-                            let physical_plan: PhysicalPlan<'a> =
-                                PhysicalPlan::new(physical_plan_expr, scan_table);
+                    PlanExpr::Relational(rel_val) => match &rel_val.rel_type {
+                        RelationalExprType::ScanExpr(_) => {
+                            let physical_plan_expr =
+                                PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
 
-                            exec_vec.push(physical_plan);
+                            exec_vec.push(PhysicalPlan::new(physical_plan_expr, scan_table));
                         }
-                        RelationalExprType::CreateTableExpr(val) => {
-                            let physical_plan_expr: PhysicalPlanExpr<'a> =
-                                PhysicalPlanExpr::Relational(RelationalExprType::CreateTableExpr(
-                                    val.clone(),
-                                ));
-                            let physical_plan: PhysicalPlan<'a> =
-                                PhysicalPlan::new(physical_plan_expr, create_table);
+                        RelationalExprType::CreateTableExpr(_) => {
+                            let physical_plan_expr =
+                                PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
 
-                            exec_vec.push(physical_plan);
+                            exec_vec.push(PhysicalPlan::new(physical_plan_expr, create_table));
                         }
-                        RelationalExprType::InsertExpr(val) => {
-                            let physical_plan_expr: PhysicalPlanExpr<'a> =
-                                PhysicalPlanExpr::Relational(RelationalExprType::InsertExpr(
-                                    val.clone(),
-                                ));
-                            let physical_plan: PhysicalPlan<'a> =
-                                PhysicalPlan::new(physical_plan_expr, insert_table);
+                        RelationalExprType::InsertExpr(_) => {
+                            let physical_plan_expr =
+                                PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
 
-                            exec_vec.push(physical_plan);
+                            exec_vec.push(PhysicalPlan::new(physical_plan_expr, insert_table));
                         }
                         RelationalExprType::InnerJoinExpr(_, _, _) => todo!(),
                         RelationalExprType::FilterExpr(_) => todo!(),
-                        RelationalExprType::IndexScanExpr { index_id: _ } => todo!(),
+                        RelationalExprType::IndexScanExpr(IndexScanExpr { index_id: _ }) => todo!(),
+                        RelationalExprType::UpdateExpr(_) => {
+                            let physical_plan_expr =
+                                PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
+
+                            exec_vec.push(PhysicalPlan::new(physical_plan_expr, update_table));
+                        }
                     },
 
                     _ => {}
@@ -335,7 +329,7 @@ impl NaadanQueryEngine {
                 let local_plan = PlanExpr::Relational(Relational {
                     rel_type: RelationalExprType::CreateTableExpr(CreateTableExpr {
                         table_name: table_name,
-                        columns: column_map,
+                        table_schema: column_map,
                     }),
                     group: None,
                     stats: None,
@@ -355,37 +349,33 @@ impl NaadanQueryEngine {
                     "Insert statement, table name is {} with columns {:?} and values {:?}",
                     table_name, columns, source
                 );
-                let t_name = table_name.0.last().unwrap().value.clone();
+                let table_name = table_name.0.last().unwrap().value.clone();
 
                 {
-                    let storage_instance = task::block_in_place(move || {
-                        println!("Locking storage_instance {:?}", SystemTime::now());
-                        self.storage_engine.blocking_lock()
-                        // do some compute-heavy work or call synchronous code
-                    });
+                    let storage_instance = self.storage_engine.lock().await;
 
-                    match storage_instance.get_table_details(&t_name) {
-                        Ok(table_catalog) => {
+                    match storage_instance.get_table_details(&table_name) {
+                        Ok(table_schema) => {
                             // TODO: validate the input columns againt the schema
                             let row_values = match &*(source.as_ref().unwrap().body) {
                                 SetExpr::Values(val) => RecordSet::new(val.rows.clone()),
                                 _ => return Err(NaadanError::LogicalPlanFailed),
                             };
 
-                            // Create plan
-                            let local_plan = PlanExpr::Relational(Relational {
-                                rel_type: RelationalExprType::InsertExpr(InsertExpr {
-                                    table_name: t_name,
-                                    rows: row_values,
-                                }),
-                                group: None,
-                                stats: None,
-                            });
+                            {
+                                // Create plan
+                                let local_plan = PlanExpr::Relational(Relational::new(
+                                    RelationalExprType::InsertExpr(InsertExpr::new(
+                                        table_name, row_values,
+                                    )),
+                                    None,
+                                    None,
+                                ));
 
-                            plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+                                plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+                            }
                         }
                         Err(err) => {
-                            error!("{}", err.to_string());
                             return Err(err);
                         }
                     }
@@ -397,7 +387,44 @@ impl NaadanQueryEngine {
                 from,
                 selection,
                 returning,
-            } => {}
+            } => {
+                let mut table_name = String::new();
+                match &table.relation {
+                    TableFactor::Table { name, .. } => {
+                        table_name = name.0.last().unwrap().value.clone()
+                    }
+                    _ => {}
+                }
+
+                let storage_instance = self.storage_engine.lock().await;
+
+                match storage_instance.get_table_details(&table_name) {
+                    Ok(table_schema) => {
+                        // TODO validate the columns
+
+                        let mut columns: HashMap<String, Expr> = HashMap::new();
+                        for assignment in assignments {
+                            let id = &assignment.id;
+                            let val = &assignment.value;
+
+                            columns.insert(id.last().unwrap().value.clone(), val.clone());
+                        }
+
+                        let local_plan = PlanExpr::Relational(Relational::new(
+                            RelationalExprType::UpdateExpr(UpdateExpr::new(
+                                table_name, columns, None,
+                            )),
+                            None,
+                            None,
+                        ));
+
+                        plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+                    }
+                    Err(err) => {
+                        return Err(err);
+                    }
+                }
+            }
             Statement::Delete { .. } => {}
 
             Statement::StartTransaction { .. } => {}

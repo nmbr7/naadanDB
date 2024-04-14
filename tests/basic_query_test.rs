@@ -5,15 +5,32 @@ use libnaadandb::{
     storage::storage_engine::NaadanStorageEngine,
     storage::StorageEngine,
 };
-use tokio::sync::Mutex;
+use tokio::{process::Command, sync::Mutex};
 
-async fn process_query(query: String, storage: Arc<Mutex<Box<dyn StorageEngine>>>) {
+type ArcStorageEngine = Arc<Mutex<Box<dyn StorageEngine>>>;
+
+async fn clean_db_files() {
+    Command::new("rm")
+        .args(&["/tmp/DB_*"])
+        .status()
+        .await
+        .unwrap();
+}
+
+fn create_storage_instance() -> ArcStorageEngine {
+    let storage: ArcStorageEngine = Arc::new(Mutex::new(Box::new(NaadanStorageEngine::init(100))));
+
+    storage
+}
+
+async fn process_query(query: String, storage: ArcStorageEngine) {
+    // Parse the provided SQL query.
     let sql_query = NaadanQuery::init(query).unwrap();
 
-    // Init a new query engine instance with reference to the global shared storage engine
+    // Init a new query engine instance with reference to the global shared storage engine.
     let query_engine = NaadanQueryEngine::init(storage).await;
 
-    // Process the sql query.
+    // Process the sql query Logical_Plan -> Physical_Plan -> Execute.
     let query_results = query_engine.process_query(sql_query).await;
 
     println!("********************************************");
@@ -26,17 +43,49 @@ async fn process_query(query: String, storage: Arc<Mutex<Box<dyn StorageEngine>>
     println!("********************************************");
 }
 
+async fn load_db_data(storage: ArcStorageEngine) {
+    let queries = [
+        "Create table test1 (id int, name varchar(255))",
+        "Insert into test1 values(1,'rom'),(2,'rob')",
+    ];
+
+    for query in queries {
+        process_query(query.to_string(), storage.clone()).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_crud() {
-    let storage: Arc<Mutex<Box<dyn StorageEngine>>> =
-        Arc::new(Mutex::new(Box::new(NaadanStorageEngine::init(100))));
+    clean_db_files().await;
 
-    let mut query = "create table test1 (id int, name varchar(255))";
-    process_query(query.to_string(), storage.clone()).await;
+    let storage = create_storage_instance();
 
-    query = "insert into test1 values(1,'rom'),(2,'rob')";
-    process_query(query.to_string(), storage.clone()).await;
+    let queries = [
+        "Create table test1 (id int, name varchar(255))",
+        "Insert into test1 values(1,'rom'),(2,'rob')",
+        "Select * from test1",
+    ];
 
-    query = "select * from test1";
-    process_query(query.to_string(), storage.clone()).await;
+    for query in queries {
+        process_query(query.to_string(), storage.clone()).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update() {
+    clean_db_files().await;
+    let storage = create_storage_instance();
+    load_db_data(storage.clone()).await;
+
+    let queries = [
+        "update test1 set name = 'Tommy'",
+        "Select * from test1",
+        "Select * from test1",
+        "update test1 set id = 4",
+        "Select * from test1",
+    ];
+
+    for query in queries {
+        process_query(query.to_string(), storage.clone()).await;
+    }
 }

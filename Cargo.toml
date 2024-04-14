@@ -20,6 +20,10 @@ thiserror = "1.0"
 [dev-dependencies]
 tokio-test = "*"
 
+[profile.test.package.naadan_db]
+#opt-level = 0          # Use slightly better optimizations.
+overflow-checks = true # Disable integer overflow checks.
+
 [lib]
 name = "libnaadandb"
 path = "src/lib.rs"

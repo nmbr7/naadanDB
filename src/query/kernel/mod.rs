@@ -1,7 +1,5 @@
 use std::{collections::HashSet, time::SystemTime};
 
-use log::{debug, error};
-use sqlparser::ast::Values;
 use tokio::task;
 
 use crate::{
@@ -12,137 +10,131 @@ use crate::{
 use super::{plan::PhysicalPlanExpr, query_engine::ExecContext};
 
 pub fn insert_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
-    println!("insert into table");
+    println!("Insert into table");
     let mut error = false;
-    let mut invalid_type = false;
 
-    match physical_plan {
-        PhysicalPlanExpr::Relational(val) => match val {
-            RelationalExprType::InsertExpr(expr) => {
-                {
-                    let mut storage_instance = task::block_in_place(|| {
-                        println!("Locking storage_instance {:?}", SystemTime::now());
-                        exec_context.get_storage_engine().unwrap().blocking_lock()
-                        // do some compute-heavy work or call synchronous code
-                    });
+    if let PhysicalPlanExpr::Relational(RelationalExprType::InsertExpr(expr)) = physical_plan {
+        {
+            let mut storage_instance = task::block_in_place(|| {
+                println!("Locking storage_instance {:?}", SystemTime::now());
+                exec_context.get_storage_engine().unwrap().blocking_lock()
+                // do some compute-heavy work or call synchronous code
+            });
 
-                    match storage_instance.get_table_details(&expr.table_name) {
-                        Ok(val) => {
-                            // TODO check row constraints, and procceed only if there are no conflict.
-                            println!("Inserting into Table '{}'", &expr.table_name);
-                            storage_instance.write_table_rows(expr.rows, &val).unwrap();
-                            error = false;
-                        }
-                        Err(_) => error = false,
-                    }
+            match storage_instance.get_table_details(&expr.table_name) {
+                Ok(val) => {
+                    // TODO check row constraints, and procceed only if there are no conflict.
+                    println!("Inserting into Table '{}'", &expr.table_name);
+                    storage_instance.write_table_rows(expr.rows, &val).unwrap();
+                    error = false;
+                }
+                Err(_) => {
+                    error = true;
+                    println!("Table '{}' not found", &expr.table_name);
                 }
             }
-            _ => invalid_type = true,
-        },
-        _ => invalid_type = true,
+        }
     }
 
-    if error {
-        exec_context.set_last_op_status(Some(false));
-        if invalid_type {
-            error!("Create table with wrong expr type ");
-        }
-    } else {
-        exec_context.set_last_op_status(Some(true));
-    }
+    exec_context.set_last_op_status(Some(!error));
 }
 
 pub fn create_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
     println!("creating table");
 
     let mut error = false;
-    let mut invalid_type = false;
 
-    match physical_plan {
-        PhysicalPlanExpr::Relational(val) => match val {
-            RelationalExprType::CreateTableExpr(expr) => {
-                let mut table = catalog::Table {
-                    name: expr.table_name,
-                    schema: expr.columns,
-                    indexes: HashSet::new(),
-                    id: 0,
-                };
-                {
-                    let mut storage_instance = task::block_in_place(|| {
-                        println!("Locking storage_instance {:?}", SystemTime::now());
-                        exec_context.get_storage_engine().unwrap().blocking_lock()
-                        // do some compute-heavy work or call synchronous code
-                    });
+    if let PhysicalPlanExpr::Relational(RelationalExprType::CreateTableExpr(expr)) = physical_plan {
+        let mut table = catalog::Table {
+            name: expr.table_name,
+            schema: expr.table_schema,
+            indexes: HashSet::new(),
+            id: 0,
+        };
+        {
+            let mut storage_instance = task::block_in_place(|| {
+                println!("Locking storage_instance {:?}", SystemTime::now());
+                exec_context.get_storage_engine().unwrap().blocking_lock()
+                // do some compute-heavy work or call synchronous code
+            });
 
-                    match storage_instance.get_table_details(&table.name) {
-                        Ok(_) => {
-                            println!("Table '{}' already exists", &table.name);
-                            error = true;
-                        }
-                        Err(_) => {
-                            storage_instance.add_table_details(&mut table).unwrap();
-                        }
-                    }
+            match storage_instance.get_table_details(&table.name) {
+                Ok(_) => {
+                    println!("Table '{}' already exists", &table.name);
+                    error = true;
+                }
+                Err(_) => {
+                    storage_instance.add_table_details(&mut table).unwrap();
                 }
             }
-            _ => invalid_type = true,
-        },
-        _ => invalid_type = true,
+        }
     }
 
-    if error {
-        exec_context.set_last_op_status(Some(false));
-        if invalid_type {
-            error!("Create table with wrong expr type ");
+    exec_context.set_last_op_status(Some(!error));
+}
+
+pub fn update_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
+    println!("Update table");
+    let mut error = false;
+
+    if let PhysicalPlanExpr::Relational(RelationalExprType::UpdateExpr(expr)) = physical_plan {
+        {
+            let mut storage_instance = task::block_in_place(|| {
+                println!("Locking storage_instance {:?}", SystemTime::now());
+                exec_context.get_storage_engine().unwrap().blocking_lock()
+                // do some compute-heavy work or call synchronous code
+            });
+
+            match storage_instance.get_table_details(&expr.table_name) {
+                Ok(schema) => {
+                    // TODO check row constraints, and procceed only if there are no conflict.
+                    println!("Inserting into Table '{}'", &expr.table_name);
+                    storage_instance
+                        .update_table_rows(None, expr.columns, &schema)
+                        .unwrap();
+                    error = false;
+                }
+                Err(_) => {
+                    error = true;
+                    println!("Table '{}' not found", &expr.table_name);
+                }
+            }
         }
-    } else {
-        exec_context.set_last_op_status(Some(true));
     }
+
+    exec_context.set_last_op_status(Some(!error));
 }
 
 pub fn scan_table(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {
-    println!("scaning table");
+    println!("Scanning table");
 
     let mut error = false;
-    let mut invalid_type = false;
     let result: RecordSet;
 
-    match physical_plan {
-        PhysicalPlanExpr::Relational(val) => match val {
-            RelationalExprType::ScanExpr(expr) => {
-                {
-                    let mut storage_instance = task::block_in_place(|| {
-                        println!("Locking storage_instance {:?}", SystemTime::now());
-                        exec_context.get_storage_engine().unwrap().blocking_lock()
-                        // do some compute-heavy work or call synchronous code
-                    });
+    if let PhysicalPlanExpr::Relational(RelationalExprType::ScanExpr(expr)) = physical_plan {
+        {
+            let storage_instance = task::block_in_place(|| {
+                println!("Locking storage_instance {:?}", SystemTime::now());
+                exec_context.get_storage_engine().unwrap().blocking_lock()
+                // do some compute-heavy work or call synchronous code
+            });
 
-                    match expr.op {
-                        crate::query::plan::ScanType::WildCardScan => {
-                            result = storage_instance.scan_table(None, &expr.schema).unwrap();
-                        }
-                        crate::query::plan::ScanType::Explicit(_) => {
-                            result = storage_instance
-                                .read_table_rows(&[1, 2], &expr.schema)
-                                .unwrap();
-                        }
-                    }
+            // TODO: do proper error check
+            match expr.op {
+                crate::query::plan::ScanType::WildCardScan => {
+                    result = storage_instance.scan_table(None, &expr.schema).unwrap();
                 }
-                exec_context.set_last_result(Some(result));
+                crate::query::plan::ScanType::Explicit(_) => {
+                    result = storage_instance
+                        .read_table_rows(&[1, 2], &expr.schema)
+                        .unwrap();
+                }
             }
-            _ => invalid_type = true,
-        },
-        _ => invalid_type = true,
+        }
+        exec_context.set_last_result(Some(result));
     }
 
-    if error {
-        exec_context.set_last_op_status(Some(false));
-        if invalid_type {
-            error!("select table with wrong expr type ");
-        }
-    } else {
-        exec_context.set_last_op_status(Some(true));
-    }
+    exec_context.set_last_op_status(Some(!error));
 }
 
 pub fn filter(exec_context: &mut ExecContext, physical_plan: PhysicalPlanExpr) {}

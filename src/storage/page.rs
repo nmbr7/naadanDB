@@ -528,7 +528,7 @@ impl Page {
     pub fn update_table_row(
         &mut self,
         row_id: &usize,
-        updated_columns: &HashMap<&str, Expr>,
+        updated_columns: &HashMap<String, Expr>,
         table: &Table,
     ) -> Result<(), NaadanError> {
         log(format!("Read row {} from page", row_id));
@@ -547,7 +547,7 @@ impl Page {
         }
 
         for (col_name, col_value) in updated_columns {
-            let col_offset = table.schema.get(*col_name).unwrap().offset;
+            let col_offset = table.schema.get(col_name).unwrap().offset;
             let update_offset = row_offset + col_offset as u32;
             buf_cursor.set_position(update_offset as u64);
 
