@@ -1,19 +1,12 @@
-use core::hash;
-use log::debug;
-use sqlparser::ast::{Expr, Values};
-use std::{
-    collections::HashMap,
-    hash::Hash,
-    ops::{Shl, Shr},
-};
-
-use crate::{query::NaadanRecord, storage::catalog::*};
-use crate::{query::RecordSet, utils::log};
+use sqlparser::ast::Expr;
+use std::collections::HashMap;
 
 use super::{
-    page::{CatalogPage, Page, PageData, PageId},
+    page::{CatalogPage, Page, PageId},
     CatalogEngine, NaadanError, RowIdType, StorageEngine, TableIdType,
 };
+use crate::query::RecordSet;
+use crate::storage::catalog::*;
 
 /// Storage Engine
 #[derive(Debug)]
@@ -129,19 +122,26 @@ impl StorageEngine for NaadanStorageEngine {
 
     fn update_table_rows(
         &mut self,
-        row_ids: &[usize],
-        updated_columns: HashMap<&str, Expr>,
+        row_ids: Option<Vec<usize>>,
+        updated_columns: HashMap<String, Expr>,
         schema: &Table,
     ) -> Result<&[RowIdType], NaadanError> {
-        for r_id in row_ids {
+        let row_id_list = match row_ids {
+            Some(val) => val,
+            None => {
+                let table_metadata = self.table_index.get(&(schema.id as usize)).unwrap();
+                Vec::from_iter(1..table_metadata.row_count as usize + 1)
+            }
+        };
+
+        for r_id in &row_id_list {
             let page_id = match self.row_index.get(r_id) {
                 Some(pageid) => pageid,
                 None => continue,
             };
 
             let page = self.buffer_pool.get_mut(&page_id).unwrap();
-            let row = page
-                .update_table_row(&r_id, &updated_columns, schema)
+            page.update_table_row(&r_id, &updated_columns, schema)
                 .unwrap();
         }
 

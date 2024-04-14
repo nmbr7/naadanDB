@@ -5,11 +5,11 @@ use std::{
     time::Duration,
 };
 
-use sqlparser::ast::Values;
+use sqlparser::ast::{Expr, Values};
 
 use crate::storage::catalog::{Column, Table};
 
-use super::{query_engine::ExecContext, RecordSet};
+use super::{query_engine::ExecContext, NaadanRecord, RecordSet};
 
 pub type Edge<T> = Rc<RefCell<T>>;
 type WeakEdge<T> = Weak<RefCell<T>>;
@@ -40,7 +40,16 @@ impl ScanExpr {
 #[derive(Debug, Clone)]
 pub struct CreateTableExpr {
     pub table_name: String,
-    pub columns: HashMap<String, Column>,
+    pub table_schema: HashMap<String, Column>,
+}
+
+impl CreateTableExpr {
+    pub fn new(table_name: String, table_schema: HashMap<String, Column>) -> Self {
+        Self {
+            table_name,
+            table_schema,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,16 +58,50 @@ pub struct InsertExpr {
     pub rows: RecordSet,
 }
 
+impl InsertExpr {
+    pub fn new(table_name: String, rows: RecordSet) -> Self {
+        Self { table_name, rows }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateExpr {
+    pub table_name: String,
+    pub columns: HashMap<String, Expr>,
+    pub predicate: Option<ScalarExprType>,
+}
+
+impl UpdateExpr {
+    pub fn new(
+        table_name: String,
+        columns: HashMap<String, Expr>,
+        predicate: Option<ScalarExprType>,
+    ) -> Self {
+        Self {
+            table_name,
+            columns,
+            predicate,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IndexScanExpr {
+    pub index_id: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum RelationalExprType<'a> {
     ScanExpr(ScanExpr),
+
     CreateTableExpr(CreateTableExpr),
     InsertExpr(InsertExpr),
+    UpdateExpr(UpdateExpr),
 
     FilterExpr(Edge<PlanExpr<'a>>),
 
     InnerJoinExpr(Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>),
-    IndexScanExpr { index_id: u32 },
+    IndexScanExpr(IndexScanExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +162,20 @@ pub struct Relational<'a> {
     pub rel_type: RelationalExprType<'a>,
     pub group: Option<WeakEdge<PlanGroup<'a>>>,
     pub stats: Option<Stats>,
+}
+
+impl<'a> Relational<'a> {
+    pub fn new(
+        rel_type: RelationalExprType<'a>,
+        group: Option<WeakEdge<PlanGroup<'a>>>,
+        stats: Option<Stats>,
+    ) -> Self {
+        Self {
+            rel_type,
+            group,
+            stats,
+        }
+    }
 }
 
 #[derive(Debug)]
