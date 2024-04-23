@@ -5,11 +5,14 @@ use std::{
     time::Duration,
 };
 
-use sqlparser::ast::{Expr, Values};
+use sqlparser::ast::Expr;
 
-use crate::storage::catalog::{Column, Table};
+use crate::{
+    rc_ref_cell,
+    storage::catalog::{Column, Table},
+};
 
-use super::{query_engine::ExecContext, NaadanRecord, RecordSet};
+use super::{query_engine::ExecContext, RecordSet};
 
 pub type Edge<T> = Rc<RefCell<T>>;
 type WeakEdge<T> = Weak<RefCell<T>>;
@@ -193,12 +196,12 @@ pub enum PlanExpr<'a> {
 
 impl<'a> PlanExpr<'a> {
     pub fn set_expr_group(self) -> Result<Edge<PlanGroup<'a>>, bool> {
-        let expr_grp = Rc::new(RefCell::new(PlanGroup {
+        let expr_grp = rc_ref_cell!(PlanGroup {
             exprs: vec![],
             best_expr: None,
-        }));
+        });
 
-        let rel_expr = Rc::new(RefCell::new(self));
+        let rel_expr = rc_ref_cell!(self);
 
         // Link the expression with group
         expr_grp.borrow_mut().exprs.push(Rc::clone(&rel_expr));
@@ -228,11 +231,33 @@ pub struct Stats {
     pub estimated_time: Duration,
 }
 
+impl Stats {
+    pub fn init() -> Self {
+        Self {
+            estimated_row_count: 0,
+            estimated_time: Duration::from_millis(0),
+        }
+    }
+}
+
 // The final cumulative Plan struct
 #[derive(Debug)]
 pub struct Plan<'a> {
     pub plan_stats: Option<Stats>,
     pub plan_expr_root: Option<Edge<PlanExpr<'a>>>,
+}
+
+impl<'a> Plan<'a> {
+    pub fn init() -> Self {
+        Self {
+            plan_stats: None,
+            plan_expr_root: None,
+        }
+    }
+
+    pub fn set_plan_expr_root(&mut self, plan_expr_root: Option<Edge<PlanExpr<'a>>>) {
+        self.plan_expr_root = plan_expr_root;
+    }
 }
 
 unsafe impl<'a> Send for Plan<'a> {}

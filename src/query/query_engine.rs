@@ -7,8 +7,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::query::kernel::{create_table, insert_table, scan_table, update_table};
 use crate::query::plan::{IndexScanExpr, *};
+use crate::query::NaadanRecord;
+use crate::rc_ref_cell;
+use crate::server::SessionContext;
 use crate::storage::catalog::{Column, ColumnType, Offset, Table};
 use crate::storage::{NaadanError, StorageEngine};
+use crate::transaction::TransactionManager;
 
 use log::{debug, error};
 use sqlparser::ast::{Expr, SetExpr, Statement, TableFactor, Values};
@@ -122,22 +126,34 @@ impl ExecContext {
 /// - It takes a reference to the global reference counted storage engine instance
 pub struct NaadanQueryEngine {
     pub storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>,
+    pub transaction_manager: Arc<Mutex<TransactionManager>>,
 }
 
 impl NaadanQueryEngine {
     /// Initialize the query engine with the shared storage engine instance
-    pub async fn init(storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>) -> Self {
+    pub async fn init(
+        storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>,
+        transaction_manager: Arc<Mutex<TransactionManager>>,
+    ) -> Self {
         Self {
             storage_engine: storage_engine,
+            transaction_manager: transaction_manager,
         }
     }
 
     /// Process the sql query AST
-    pub async fn process_query(&self, query: NaadanQuery) -> Vec<Result<QueryResult, NaadanError>> {
+    pub async fn process_query(
+        &self,
+        session_context: &mut SessionContext,
+        query: NaadanQuery,
+    ) -> Vec<Result<QueryResult, NaadanError>> {
         let mut result: Vec<Result<QueryResult, NaadanError>> = Vec::new();
 
         for statement in query.ast.iter() {
-            if let Some(value) = self.process_query_statement(statement).await {
+            if let Some(value) = self
+                .process_query_statement(session_context, statement)
+                .await
+            {
                 result.push(value);
             }
         }
@@ -147,32 +163,37 @@ impl NaadanQueryEngine {
 
     async fn process_query_statement(
         &self,
+        session_context: &mut SessionContext,
         statement: &Statement,
     ) -> Option<Result<QueryResult, NaadanError>> {
         let query_str = statement.to_string();
         println!("Processing query: {}", query_str);
 
         // Create logical plan for the query from the AST
-        let logical_plan = match self.prepare_logical_plan(statement).await {
+        let logical_plan = match self.prepare_logical_plan(session_context, statement).await {
             Ok(val) => val,
             Err(err) => return Some(Err(err)),
         };
         println!("Logical Plan is : {:?}", logical_plan);
 
         // Prepare the physical plan
-        let physical_plan = match self.prepare_physical_plan(&logical_plan).await {
+        let physical_plan = match self
+            .prepare_physical_plan(session_context, &logical_plan)
+            .await
+        {
             Ok(val) => val,
             Err(err) => return Some(Err(err)),
         };
         println!("Physical Plan is : {:?}", physical_plan);
 
         // Execute the query using the physical plan
-        Some(self.execute(physical_plan).await)
+        Some(self.execute(session_context, physical_plan).await)
     }
 
     /// Execute the physical query plan.
     pub async fn execute<'a>(
         &self,
+        session_context: &mut SessionContext,
         physical_plan: Vec<PhysicalPlan<'a>>,
     ) -> Result<QueryResult, NaadanError> {
         println!("Executing final query plan.");
@@ -203,6 +224,7 @@ impl NaadanQueryEngine {
 
     async fn prepare_physical_plan<'a>(
         &'a self,
+        session_context: &mut SessionContext,
         logical_plan: &Vec<Plan<'a>>,
     ) -> Result<Vec<PhysicalPlan>, NaadanError> {
         let mut exec_vec: Vec<PhysicalPlan> = Vec::new();
@@ -253,21 +275,13 @@ impl NaadanQueryEngine {
 
     async fn prepare_logical_plan<'a>(
         &'a self,
+        session_context: &mut SessionContext,
         statement: &Statement,
     ) -> Result<Vec<Plan<'a>>, NaadanError> {
         let mut final_plan_list: Vec<Plan<'a>> = vec![];
         // Iterate through the AST and create best logical plan which potentially has the least f execution
 
-        // TODO: Read from the DB catalog to get info about the the table (table name id, row count, columns etc..)
-        //       based on the info from the catalog info, validate the query.
-
-        let mut plan: Plan = Plan {
-            plan_stats: Some(Stats {
-                estimated_row_count: 0,
-                estimated_time: Duration::from_millis(0),
-            }),
-            plan_expr_root: None,
-        };
+        let mut plan: Plan = Plan::init();
 
         match statement {
             Statement::CreateTable { name, columns, .. } => {
@@ -323,8 +337,6 @@ impl NaadanQueryEngine {
                     offset += Offset::from(&col.data_type).get_value();
                 }
 
-                // TODO: Check if a table exist with the same name.
-
                 // Create plan
                 let local_plan = PlanExpr::Relational(Relational {
                     rel_type: RelationalExprType::CreateTableExpr(CreateTableExpr {
@@ -335,7 +347,7 @@ impl NaadanQueryEngine {
                     stats: None,
                 });
 
-                plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+                plan.set_plan_expr_root(Some(rc_ref_cell!(local_plan)));
             }
             Statement::AlterTable { .. } => {}
 
@@ -356,9 +368,14 @@ impl NaadanQueryEngine {
 
                     match storage_instance.get_table_details(&table_name) {
                         Ok(table_schema) => {
-                            // TODO: validate the input columns againt the schema
                             let row_values = match &*(source.as_ref().unwrap().body) {
-                                SetExpr::Values(val) => RecordSet::new(val.rows.clone()),
+                                SetExpr::Values(Values { rows, .. }) => {
+                                    if !is_records_valid(rows, columns, table_schema) {
+                                        return Err(NaadanError::SchemaValidationFailed);
+                                    }
+
+                                    RecordSet::new(rows.clone())
+                                }
                                 _ => return Err(NaadanError::LogicalPlanFailed),
                             };
 
@@ -372,7 +389,7 @@ impl NaadanQueryEngine {
                                     None,
                                 ));
 
-                                plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+                                plan.set_plan_expr_root(Some(rc_ref_cell!(local_plan)));
                             }
                         }
                         Err(err) => {
@@ -418,7 +435,7 @@ impl NaadanQueryEngine {
                             None,
                         ));
 
-                        plan.plan_expr_root = Some(Rc::new(RefCell::new(local_plan)));
+                        plan.set_plan_expr_root(Some(rc_ref_cell!(local_plan)));
                     }
                     Err(err) => {
                         return Err(err);
@@ -427,9 +444,47 @@ impl NaadanQueryEngine {
             }
             Statement::Delete { .. } => {}
 
-            Statement::StartTransaction { .. } => {}
-            Statement::Rollback { .. } => {}
-            Statement::Commit { .. } => {}
+            Statement::StartTransaction {
+                modes,
+                begin,
+                modifier,
+            } => {
+                let mut transaction_manager = task::block_in_place(|| {
+                    println!("Locking transaction_manager {:?}", SystemTime::now());
+                    self.transaction_manager.blocking_lock()
+                });
+
+                let new_transaction = transaction_manager.start_new_transaction().unwrap();
+                session_context.set_current_transaction_id(new_transaction.id());
+            }
+            Statement::Rollback { chain, savepoint } => {
+                let mut transaction_manager = task::block_in_place(|| {
+                    println!("Locking transaction_manager {:?}", SystemTime::now());
+                    self.transaction_manager.blocking_lock()
+                });
+
+                if session_context.current_transaction_id > 0 {
+                    transaction_manager
+                        .rollback_transaction(session_context.current_transaction_id)
+                        .unwrap();
+                } else {
+                    return Err(NaadanError::TransactionSessionInvalid);
+                }
+            }
+            Statement::Commit { chain } => {
+                let mut transaction_manager = task::block_in_place(|| {
+                    println!("Locking transaction_manager {:?}", SystemTime::now());
+                    self.transaction_manager.blocking_lock()
+                });
+
+                if session_context.current_transaction_id > 0 {
+                    transaction_manager
+                        .commit_transaction(session_context.current_transaction_id)
+                        .unwrap();
+                } else {
+                    return Err(NaadanError::TransactionSessionInvalid);
+                }
+            }
 
             Statement::CreateDatabase { .. } => {}
             Statement::Drop { .. } => {}
@@ -575,5 +630,38 @@ impl NaadanQueryEngine {
 
         println!("Select query plan Groups: {:?}", plan_group_list);
         Ok(plan_group_list)
+    }
+}
+
+fn is_records_valid(
+    rows: &Vec<NaadanRecord>,
+    columns: &Vec<sqlparser::ast::Ident>,
+    table_schema: Table,
+) -> bool {
+    if columns.len() != 0 {
+        // Validate by column names position and count
+        if columns.len() == table_schema.schema.len() {
+            rows.iter().all(|row: &NaadanRecord| {
+                if row.len() != table_schema.schema.len() {
+                    return false;
+                }
+                row.iter()
+                    .zip(columns)
+                    .enumerate()
+                    .all(|(c_index, (c_value, c_name))| {
+                        if let Some(col) = table_schema.schema.get(&c_name.value) {
+                            // TODO do proper validation
+                            true
+                        } else {
+                            false
+                        }
+                    })
+            })
+        } else {
+            false
+        }
+    } else {
+        // TODO: validate by column value position
+        true
     }
 }

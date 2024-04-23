@@ -32,10 +32,17 @@ pub enum NaadanError {
 
     #[error("Logical plan creation failed")]
     LogicalPlanFailed,
+
+    #[error("Query not in a valid transaction session")]
+    TransactionSessionInvalid,
+
     #[error("Physical plan creation failed")]
     PhysicalPlanFailed,
     #[error("Query execution failed")]
     QueryExecutionFailed,
+
+    #[error("Provided columns does not match the table schema")]
+    SchemaValidationFailed,
 
     #[error("File system operation failed")]
     FileSystemError(#[from] std::io::Error),

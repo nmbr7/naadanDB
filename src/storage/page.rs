@@ -63,12 +63,10 @@ pub struct PageData {
     ///
     /// We can also store the is_null flag inside the most significant bit of the Offset value.
     /// that will make (1 null_bit)+(2^31 offset_bits), though we might not need 31bit(2GB) of offset.
-    ///
     pub offset: HashMap<Id, Offset>,
 
     /// The page row data field.
     /// will have dynamic values based on the table schema and other details,
-    ///
     pub data: Vec<u8>,
 }
 
@@ -725,42 +723,6 @@ mod tests {
         }
     }
 
-    // #[test]
-    // fn read_page_from_disk() {
-    //     fs::remove_file(DB_DATAFILE);
-    //     let mut reg = Region::new(&GLOBAL);
-    //     println!("*** Test Starting <read_page_from_disk> ***\n");
-
-    //     let mut s_engine = NaadanStorageEngine::init(1);
-    //     //println!("Stats at 1: {:#?}", reg.change());
-    //     let row_data = get_test_data();
-    //     let row2_data = get_test_data();
-
-    //     let row3_data = get_test_data();
-
-    //     //println!("Stats at 2: {:#?}", reg.change_and_reset());
-
-    //     let _ = s_engine.write_row(&0x41, row_data);
-    //     println!("Stats at 4: {:#?}", reg.change());
-
-    //     let _ = s_engine.write_row(&0x42, row2_data);
-    //     // // println!("Stats at 4: {:#?}", reg.change());
-
-    //     let _ = s_engine.write_row(&0x45, row3_data.clone());
-    //     // println!("Stats at 4: {:#?}", reg.change());
-
-    //     // let _ = s_engine.write_row(&0x56, row3_data.clone());
-
-    //     // for i in 0..2 {
-    //     //     //sleep(Duration::from_millis(1000));
-    //     //     //println!("{}", i);
-    //     //     let _ = s_engine.write_row(&(0x43 + i), row3_data.clone());
-    //     // }
-
-    //     let _ = s_engine.read_row(0x45);
-    //     println!("Stats at 5: {:#?}", reg.change());
-    // }
-
     #[test]
     fn catalog_write() {
         let mut page = Page::new_with_capacity(4 * 1024);
@@ -809,61 +771,4 @@ mod tests {
             Err(_) => println!("Table not found"),
         }
     }
-
-    // #[test]
-    // fn it_works() {
-    //     fs::remove_file(DB_DATAFILE);
-    //     println!("*** Test Starting ***\n");
-
-    //     let mut s_engine = NaadanStorageEngine::init(200);
-    //     let mut row_data = get_test_data();
-
-    //     let mut row_id: usize = 7;
-    //     s_engine.write_row(&row_id, row_data);
-
-    //     println!("\n Reading 1 \n");
-    //     s_engine.read_row(row_id);
-
-    //     row_id = 2;
-    //     row_data = get_test_data();
-    //     s_engine.write_row(&row_id, row_data);
-
-    //     println!("\n Reading 2 \n");
-    //     s_engine.read_row(row_id);
-
-    //     s_engine.reset_memory();
-
-    //     println!("\n Reading 3 \n");
-    //     s_engine.read_row(row_id);
-
-    //     row_id = 3;
-
-    //     row_data = get_test_data();
-    //     s_engine.write_row(&row_id, row_data);
-
-    //     row_id = 4;
-
-    //     row_data = get_test_data();
-    //     s_engine.write_row(&row_id, row_data);
-
-    //     row_id = 5;
-
-    //     row_data = get_test_data();
-    //     s_engine.write_row(&row_id, row_data);
-
-    //     row_id = 6;
-
-    //     row_data = get_test_data();
-    //     s_engine.write_row(&row_id, row_data);
-
-    //     println!("\n Reading 4 \n");
-    //     s_engine.read_row(row_id);
-
-    //     s_engine.reset_memory();
-
-    //     println!("\n Reading 5 \n");
-    //     s_engine.read_row(row_id);
-
-    //     println!("\n *** Test Ended ***\n");
-    // }
 }

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::{
     query::{query_engine::NaadanQueryEngine, NaadanQuery},
     storage::{storage_engine::NaadanStorageEngine, NaadanError, StorageEngine},
+    transaction::TransactionManager,
 };
 
 #[derive(Debug)]
@@ -24,6 +25,24 @@ pub struct ServerConfig {
 pub struct NaadanServer {
     pub config: ServerConfig,
     pub storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>,
+    pub transaction_manager: Arc<Mutex<TransactionManager>>,
+}
+
+#[derive(Debug)]
+pub struct SessionContext {
+    pub current_transaction_id: u64,
+}
+
+impl SessionContext {
+    pub fn new() -> Self {
+        Self {
+            current_transaction_id: 0,
+        }
+    }
+
+    pub fn set_current_transaction_id(&mut self, current_transaction_id: u64) {
+        self.current_transaction_id = current_transaction_id;
+    }
 }
 
 impl NaadanServer {
@@ -31,6 +50,7 @@ impl NaadanServer {
         NaadanServer {
             config: server_config,
             storage_engine: Arc::new(Mutex::new(Box::new(NaadanStorageEngine::init(1024)))),
+            transaction_manager: Arc::new(Mutex::new(TransactionManager::init())),
         }
     }
 
@@ -89,11 +109,18 @@ impl NaadanServer {
             };
 
             // Init a new query engine instance with reference to the global shared storage engine
-            let query_engine =
-                NaadanQueryEngine::init(server_instance.storage_engine.clone()).await;
+            let query_engine = NaadanQueryEngine::init(
+                server_instance.storage_engine.clone(),
+                server_instance.transaction_manager.clone(),
+            )
+            .await;
+
+            let mut session_context = SessionContext::new();
 
             // Process the sql query.
-            let query_results = query_engine.process_query(sql_query).await;
+            let query_results = query_engine
+                .process_query(&mut session_context, sql_query)
+                .await;
 
             for query_result in query_results {
                 match query_result {
