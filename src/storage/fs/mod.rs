@@ -8,7 +8,7 @@ use super::NaadanError;
 pub struct NaadanFile(File);
 
 impl NaadanFile {
-    pub fn read(filename: &str, ) -> Result<NaadanFile, NaadanError> {
+    pub fn read(filename: &str) -> Result<NaadanFile, NaadanError> {
         match File::options().read(true).open(filename) {
             Ok(file) => Ok(NaadanFile(file)),
             Err(err) => Err(NaadanError::FileSystemError(err)),

@@ -23,6 +23,20 @@ fn create_storage_instance() -> ArcStorageEngine {
     storage
 }
 
+async fn reset_storage_and_process_queries(queries: &[&str]) {
+    clean_db_files().await;
+    let storage = create_storage_instance();
+    load_db_data(storage.clone()).await;
+
+    process_queries(queries, storage).await;
+}
+
+async fn process_queries(queries: &[&str], storage: ArcStorageEngine) {
+    for query in queries {
+        process_query(query.to_string(), storage.clone()).await;
+    }
+}
+
 async fn process_query(query: String, storage: ArcStorageEngine) {
     // Parse the provided SQL query.
     let sql_query = NaadanQuery::init(query).unwrap();
@@ -34,6 +48,7 @@ async fn process_query(query: String, storage: ArcStorageEngine) {
     let query_results = query_engine.process_query(sql_query).await;
 
     println!("********************************************");
+
     for query_result in query_results {
         match query_result {
             Ok(val) => println!("{}", val.to_string()),
@@ -43,6 +58,7 @@ async fn process_query(query: String, storage: ArcStorageEngine) {
     println!("********************************************");
 }
 
+/// Load the base setup data in the DB
 async fn load_db_data(storage: ArcStorageEngine) {
     let queries = [
         "Create table test1 (id int, name varchar(255))",
@@ -66,17 +82,11 @@ async fn test_basic_crud() {
         "Select * from test1",
     ];
 
-    for query in queries {
-        process_query(query.to_string(), storage.clone()).await;
-    }
+    process_queries(queries.as_slice(), storage).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_update() {
-    clean_db_files().await;
-    let storage = create_storage_instance();
-    load_db_data(storage.clone()).await;
-
     let queries = [
         "update test1 set name = 'Tommy'",
         "Select * from test1",
@@ -85,7 +95,5 @@ async fn test_update() {
         "Select * from test1",
     ];
 
-    for query in queries {
-        process_query(query.to_string(), storage.clone()).await;
-    }
+    reset_storage_and_process_queries(queries.as_slice()).await;
 }
