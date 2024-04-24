@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use libnaadandb::{
     query::{query_engine::NaadanQueryEngine, NaadanQuery},
-    storage::storage_engine::NaadanStorageEngine,
-    storage::StorageEngine,
+    server::SessionContext,
+    storage::{storage_engine::NaadanStorageEngine, StorageEngine},
+    transaction::TransactionManager,
 };
 use tokio::{process::Command, sync::Mutex};
 
@@ -42,10 +43,15 @@ async fn process_query(query: String, storage: ArcStorageEngine) {
     let sql_query = NaadanQuery::init(query).unwrap();
 
     // Init a new query engine instance with reference to the global shared storage engine.
-    let query_engine = NaadanQueryEngine::init(storage).await;
+    let query_engine =
+        NaadanQueryEngine::init(storage, Arc::new(Mutex::new(TransactionManager::init()))).await;
+
+    let mut session_context = SessionContext::new();
 
     // Process the sql query Logical_Plan -> Physical_Plan -> Execute.
-    let query_results = query_engine.process_query(sql_query).await;
+    let query_results = query_engine
+        .process_query(&mut session_context, sql_query)
+        .await;
 
     println!("********************************************");
 
@@ -70,8 +76,10 @@ async fn load_db_data(storage: ArcStorageEngine) {
     }
 }
 
+// ******************** Test Cases ******************** //
+
 #[tokio::test(flavor = "multi_thread")]
-async fn test_basic_crud() {
+async fn test_basic_create_insert_select() {
     clean_db_files().await;
 
     let storage = create_storage_instance();
@@ -86,7 +94,11 @@ async fn test_basic_crud() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_update() {
+async fn test_none_predicate_update() {
+    clean_db_files().await;
+    let storage = create_storage_instance();
+    load_db_data(storage.clone()).await;
+
     let queries = [
         "update test1 set name = 'Tommy'",
         "Select * from test1",
@@ -97,3 +109,52 @@ async fn test_update() {
 
     reset_storage_and_process_queries(queries.as_slice()).await;
 }
+
+// TODO: Update Test with predicate
+
+// TODO: Select Test with predicate
+
+// TODO: Select Test with 'join'
+
+// TODO: Select Test with 'join with predicate'
+
+// TODO: Select Test with 'limit'
+
+// TODO: Select Test with 'order by'
+
+// TODO: Select Test with 'group by'
+
+// TODO: Select Test with all the common expressions
+//       - join, Predicate, group by, order by, limit
+
+// TODO: Transaction Test - Success case - parallel write
+//       Insert 5 rows in a table
+//       Select all and assert
+//       Run 2 transactions and update 2 independent rows
+//       The final select should show consistent result for the updated rows
+
+// TODO: Transaction Test - Success case - parallel write
+//       Insert 5 rows in a table
+//       Select all and assert
+//       Run 2 transactions and update 2 same rows
+//       second transaction will fail and need to be re-run
+//       The final select should show consistent result for the updated rows
+
+// TODO: Transaction Test - Failure case - complete rollback
+//       Insert 5 rows in a table
+//       Select all and assert
+//       Run 2 transactions and update 2 same rows
+//       Rollback 1 transaction or kill the client
+//       The final select should show consistent result for the updated rows
+
+// TODO: Transaction Test - Success case - parallel read and write
+//       Insert 5 rows in a table
+//       Select all and assert
+//       Run 4 transactions 2 of them updating 2 rows and other 2 reading the same updated rows
+//       The 2 reads should return the row data as of the transaction start time
+//       The final select should show consistent result for the updated rows
+
+// TODO: Transaction Test - Success Case - Bank account balance case
+//       Insert 100 bank accounts and balance
+//       Run 100 transactions moving money from 1 account to another or randomly
+//       Final sum of all account balance should be the same as that at the start.

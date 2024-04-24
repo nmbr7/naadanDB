@@ -9,8 +9,80 @@ naadanDB
 
 <br>
   
-## Build
+# Project Goals
+1. Learn and experiment with various database design techniques.
+2. Implement a database which can efficiently handles hybrid (OLTP & OLAP) workloads.
+3. Create a detailed documentation describing pros & cons of different techniques.
+
+# Build
+
 Run `cargo build` to build the project.
 
 ## Running the UTs
+
 Run `cargo test -- --nocapture` to run the UTs with console output.
+
+- Tests for the individual components will be available in the respective modules
+- Integration tests are available in the `/tests` folder
+
+# Utilities
+
+- CLI - [naadanCLI](https://github.com/nmbr7/naadanCLI)
+
+# Design
+
+```
+              --------------------------------------------------------------------------------------------------
+Query ----> | Parser -> [AST] -> Logical Plan -> Physical Plan -> Executor -> Transaction layer -> Storage Layer|
+              --------------------------------------------------------------------------------------------------
+```
+
+Most of the core components are written from scratch except for the parser.
+
+- For the parse we use the [sqlparser](https://crates.io/crates/sqlparser) crate.
+
+## Components
+
+- Server Layer
+  - [x] Tokio async handler
+- Query Layer
+  - [x] Parser
+  - [x] Logical Planner
+  - [x] Physical Planner
+  - [x] Executor
+- Transaction Layer
+  - [ ] MVCC with in-memory version chaining
+  - [ ] Support Serializable Isolation level
+- Storage Layer
+  - [x] Row store format
+  - [ ] B-tree index
+  - [x] Binary format for Page structure (No extra serialization required)
+
+# Benchmark
+
+- TODO
+
+# Features TODO
+
+### SQL level
+
+- Join
+- Predicates
+- Group by, Order by, Limit
+- Stored procedures
+- Cursors
+- Triggers
+- Partitioning
+- Replication
+
+### DB Design level
+
+- DB Configurability support
+- Target Webassembly runtime
+- Proper recovery support
+- Lock free data structures
+- Optimistic latching
+- Stream processing
+- Column store
+- JIT query execution
+- Distributed operation
