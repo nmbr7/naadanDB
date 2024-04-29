@@ -9,4 +9,4 @@
 
 ## Cargo loc
 ## Install: `cargo install loc`
-loc --files src
+loc --files src tests

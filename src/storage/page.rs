@@ -427,7 +427,6 @@ impl Page {
         let data = &mut self.data;
 
         let mut buf_cursor = Cursor::new(&mut data.data);
-
         let mut dyn_cursor_base: u64 = self.header.last_var_len_offset as u64;
 
         if dyn_cursor_base < var_len_buf_offset {
@@ -448,6 +447,7 @@ impl Page {
                 }
             }
             println!("Done inserting row {}", row_id);
+
             self.header
                 .offset
                 .insert(row_id as u32, self.header.last_offset as u32);
@@ -460,63 +460,20 @@ impl Page {
     }
 
     /// Read a row from the table page
-    pub fn read_table_row(&self, row_id: &usize, table: &Table) -> Result<Vec<Expr>, NaadanError> {
+    pub fn read_table_row(&self, row_id: &u64, table: &Table) -> Result<Vec<Expr>, NaadanError> {
         log(format!("Read row {} from page", row_id));
-        let row_offset = self.header.offset.get(&(*row_id as u32)).unwrap();
+        let row_offset = *self.header.offset.get(&(*row_id as u32)).unwrap() as u64;
 
         let data = &self.data;
         let mut buf_cursor = Cursor::new(&data.data);
-        buf_cursor.set_position(*row_offset as u64);
+        buf_cursor.set_position(row_offset as u64);
 
         let mut row: Vec<(String, Expr)> = vec![];
         for (c_name, c_type) in &table.schema {
-            buf_cursor.set_position((*row_offset as u64) + (c_type.offset as u64));
-            match c_type.column_type {
-                ColumnType::UnSupported => {}
-                ColumnType::Int => {
-                    let mut buf = [0u8; 4];
-                    buf_cursor.read_exact(&mut buf).unwrap();
-                    let number = i32::from_be_bytes(buf);
+            let read_offset = row_offset + c_type.offset;
 
-                    row.push((
-                        c_name.to_string(),
-                        Expr::Value(sqlparser::ast::Value::Number(
-                            number.to_string(),
-                            c_type.is_nullable,
-                        )),
-                    ))
-                }
-                ColumnType::Float => {}
-                ColumnType::Bool => {
-                    let mut buf = [0u8; 1];
-                    buf_cursor.read_exact(&mut buf).unwrap();
-                    let bool_val = match buf {
-                        [0x1] => true,
-                        _ => false,
-                    };
-
-                    row.push((
-                        c_name.to_string(),
-                        Expr::Value(sqlparser::ast::Value::Boolean(bool_val)),
-                    ))
-                }
-                ColumnType::String => {
-                    let mut offset_buf = [0u8; 8];
-                    buf_cursor.read_exact(&mut offset_buf).unwrap();
-
-                    let offset = u64::from_be_bytes(offset_buf);
-
-                    let str_val = read_string_from_buf(&mut buf_cursor, offset, true);
-
-                    row.push((
-                        c_name.to_string(),
-                        Expr::Value(sqlparser::ast::Value::SingleQuotedString(str_val)),
-                    ))
-                }
-                ColumnType::Binary => {}
-                ColumnType::DateTime => {}
-            }
-            println!("Col vec {:?}", row);
+            buf_cursor.set_position(read_offset);
+            read_column_value(c_type, c_name, &mut buf_cursor, &mut row);
         }
 
         Ok(row.iter().map(|val| val.1.clone()).collect::<Vec<Expr>>())
@@ -525,16 +482,20 @@ impl Page {
     /// Update a row in the table page
     pub fn update_table_row(
         &mut self,
-        row_id: &usize,
+        row_id: &u64,
         updated_columns: &HashMap<String, Expr>,
         table: &Table,
-    ) -> Result<(), NaadanError> {
+        //row_handler: F,
+    ) -> Result<(), NaadanError>
+// where
+    //     F: FnOnce(&Expr) -> Result<R, NaadanError>,
+    {
         log(format!("Read row {} from page", row_id));
-        let row_offset = self.header.offset.get(&(*row_id as u32)).unwrap();
+        let row_offset = *self.header.offset.get(&(*row_id as u32)).unwrap() as u64;
 
         let data = &mut self.data;
         let mut buf_cursor = Cursor::new(&mut data.data);
-        buf_cursor.set_position(*row_offset as u64);
+        buf_cursor.set_position(row_offset);
 
         let var_len_buf_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
 
@@ -546,9 +507,11 @@ impl Page {
 
         for (col_name, col_value) in updated_columns {
             let col_offset = table.schema.get(col_name).unwrap().offset;
-            let update_offset = row_offset + col_offset as u32;
-            buf_cursor.set_position(update_offset as u64);
+            let update_offset = row_offset + col_offset;
 
+            buf_cursor.set_position(update_offset);
+
+            //row_handler(col_value);
             write_column_value(&col_value, &mut buf_cursor, &mut dyn_cursor_base);
         }
 
@@ -623,6 +586,59 @@ impl Page {
 
         let page: Page = bincode::deserialize_from(&buf[..]).unwrap();
         Ok(page)
+    }
+}
+
+fn read_column_value(
+    c_type: &Column,
+    c_name: &String,
+    buf_cursor: &mut Cursor<&Vec<u8>>,
+    row: &mut Vec<(String, Expr)>,
+) {
+    match c_type.column_type {
+        ColumnType::UnSupported => {}
+        ColumnType::Int => {
+            let mut buf = [0u8; 4];
+            buf_cursor.read_exact(&mut buf).unwrap();
+            let number = i32::from_be_bytes(buf);
+
+            row.push((
+                c_name.to_string(),
+                Expr::Value(sqlparser::ast::Value::Number(
+                    number.to_string(),
+                    c_type.is_nullable,
+                )),
+            ))
+        }
+        ColumnType::Float => {}
+        ColumnType::Bool => {
+            let mut buf = [0u8; 1];
+            buf_cursor.read_exact(&mut buf).unwrap();
+            let bool_val = match buf {
+                [0x1] => true,
+                _ => false,
+            };
+
+            row.push((
+                c_name.to_string(),
+                Expr::Value(sqlparser::ast::Value::Boolean(bool_val)),
+            ))
+        }
+        ColumnType::String => {
+            let mut offset_buf = [0u8; 8];
+            buf_cursor.read_exact(&mut offset_buf).unwrap();
+
+            let offset = u64::from_be_bytes(offset_buf);
+
+            let str_val = read_string_from_buf(buf_cursor, offset, true);
+
+            row.push((
+                c_name.to_string(),
+                Expr::Value(sqlparser::ast::Value::SingleQuotedString(str_val)),
+            ))
+        }
+        ColumnType::Binary => {}
+        ColumnType::DateTime => {}
     }
 }
 

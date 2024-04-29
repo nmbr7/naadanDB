@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use sqlparser::ast::Expr;
 use thiserror::Error;
 
-use crate::query::{plan::ScalarExprType, RecordSet};
+use crate::query::{plan::ScalarExprType, NaadanRecord, RecordSet};
 
 use self::catalog::Table;
 
@@ -27,6 +27,8 @@ pub enum NaadanError {
 
     #[error("Adding new rows to table failed")]
     RowAddFailed,
+    #[error("Getting rows from table failed, Row not found")]
+    RowNotFound,
     #[error("Flusing page to disk failed")]
     PageFlushFailed,
 
@@ -57,7 +59,7 @@ pub type TableIdType = usize;
 /// Trait interface for DB schema operations.
 pub trait CatalogEngine {
     /// Add table into the DB catalog
-    fn add_table_details(&mut self, table: &mut Table) -> Result<TableIdType, NaadanError>;
+    fn add_table_details(&self, table: &mut Table) -> Result<TableIdType, NaadanError>;
 
     /// Get table details from the DB catalog
     fn get_table_details(&self, name: &String) -> Result<Table, NaadanError>;
@@ -68,35 +70,39 @@ pub trait CatalogEngine {
 
 /// Trait interface for all storage operations.
 pub trait StorageEngine: CatalogEngine + std::fmt::Debug + Send {
+    type ScanIterator<'a>: Iterator<Item = Result<NaadanRecord, NaadanError>>
+    where
+        Self: 'a;
+
     /// Insert new rows into a table
     fn write_table_rows(
-        &mut self,
+        &self,
         row_values: RecordSet,
         schema: &Table,
     ) -> Result<RowIdType, NaadanError>;
 
     /// Retrieve rows from a table
-    fn read_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<RecordSet, NaadanError>;
+    fn read_table_rows<'a>(
+        &'a self,
+        row_ids: &'a [u64],
+        schema: &'a Table,
+    ) -> Self::ScanIterator<'_>;
 
     /// Retrieve rows from a table
-    fn scan_table(
-        &self,
+    fn scan_table<'a>(
+        &'a self,
         predicate: Option<ScalarExprType>,
-        schema: &Table,
-    ) -> Result<RecordSet, NaadanError>;
+        schema: &'a Table,
+    ) -> Self::ScanIterator<'_>;
 
     /// Delete rows from a table
-    fn delete_table_rows(
-        &self,
-        row_ids: &[usize],
-        schema: &Table,
-    ) -> Result<RecordSet, NaadanError>;
+    fn delete_table_rows(&self, row_ids: &[u64], schema: &Table) -> Result<RecordSet, NaadanError>;
 
     /// Update rows from a table
     fn update_table_rows(
-        &mut self,
-        row_ids: Option<Vec<usize>>,
-        updates_columns: HashMap<String, Expr>,
+        &self,
+        row_ids: Option<Vec<u64>>,
+        updates_columns: &HashMap<String, Expr>,
         schema: &Table,
     ) -> Result<&[RowIdType], NaadanError>;
 }

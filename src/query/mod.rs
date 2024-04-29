@@ -1,17 +1,16 @@
 use core::slice;
 use std::fmt;
 
-use sqlparser::ast::{Expr, Statement};
-
-use crate::storage::NaadanError;
-
 use self::parser::NaadanParser;
+use crate::storage::NaadanError;
+use sqlparser::ast::{Expr, Statement};
 
 mod kernel;
 pub mod parser;
 pub mod plan;
 pub mod query_engine;
 
+/// Represents a row in a DB table (a collection of [`Expr`] type)
 pub type NaadanRecord = Vec<Expr>;
 
 /// Represents a collection of rows.

@@ -8,7 +8,7 @@ use libnaadandb::{
 };
 use tokio::{process::Command, sync::Mutex};
 
-type ArcStorageEngine = Arc<Mutex<Box<dyn StorageEngine>>>;
+type ArcStorageEngine = Arc<Box<NaadanStorageEngine>>;
 
 async fn clean_db_files() {
     Command::new("rm")
@@ -19,32 +19,39 @@ async fn clean_db_files() {
 }
 
 fn create_storage_instance() -> ArcStorageEngine {
-    let storage: ArcStorageEngine = Arc::new(Mutex::new(Box::new(NaadanStorageEngine::init(100))));
+    let storage: ArcStorageEngine = Arc::new(Box::new(NaadanStorageEngine::init(100)));
 
     storage
 }
 
 async fn reset_storage_and_process_queries(queries: &[&str]) {
     clean_db_files().await;
-    let storage = create_storage_instance();
-    load_db_data(storage.clone()).await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
 
-    process_queries(queries, storage).await;
+    load_db_data(transaction_manager.clone()).await;
+
+    process_queries(queries, transaction_manager).await;
 }
 
-async fn process_queries(queries: &[&str], storage: ArcStorageEngine) {
+async fn process_queries(
+    queries: &[&str],
+    transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
+) {
     for query in queries {
-        process_query(query.to_string(), storage.clone()).await;
+        process_query(query.to_string(), transaction_manager.clone()).await;
     }
 }
 
-async fn process_query(query: String, storage: ArcStorageEngine) {
+async fn process_query(
+    query: String,
+    transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
+) {
     // Parse the provided SQL query.
     let sql_query = NaadanQuery::init(query).unwrap();
-
     // Init a new query engine instance with reference to the global shared storage engine.
-    let query_engine =
-        NaadanQueryEngine::init(storage, Arc::new(Mutex::new(TransactionManager::init()))).await;
+    let query_engine = NaadanQueryEngine::init(transaction_manager).await;
 
     let mut session_context = SessionContext::new();
 
@@ -65,14 +72,14 @@ async fn process_query(query: String, storage: ArcStorageEngine) {
 }
 
 /// Load the base setup data in the DB
-async fn load_db_data(storage: ArcStorageEngine) {
+async fn load_db_data(transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>) {
     let queries = [
         "Create table test1 (id int, name varchar(255))",
         "Insert into test1 values(1,'rom'),(2,'rob')",
     ];
 
     for query in queries {
-        process_query(query.to_string(), storage.clone()).await;
+        process_query(query.to_string(), transaction_manager.clone()).await;
     }
 }
 
@@ -82,7 +89,9 @@ async fn load_db_data(storage: ArcStorageEngine) {
 async fn test_basic_create_insert_select() {
     clean_db_files().await;
 
-    let storage = create_storage_instance();
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
 
     let queries = [
         "Create table test1 (id int, name varchar(255))",
@@ -90,17 +99,20 @@ async fn test_basic_create_insert_select() {
         "Select * from test1",
     ];
 
-    process_queries(queries.as_slice(), storage).await;
+    process_queries(queries.as_slice(), transaction_manager).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_none_predicate_update() {
     clean_db_files().await;
-    let storage = create_storage_instance();
-    load_db_data(storage.clone()).await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
+
+    load_db_data(transaction_manager.clone()).await;
 
     let queries = [
-        "update test1 set name = 'Tommy'",
+        "update test1 set name = 'Tomy'",
         "Select * from test1",
         "Select * from test1",
         "update test1 set id = 4",

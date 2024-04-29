@@ -5,14 +5,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::query::kernel::{create_table, insert_table, scan_table, update_table};
+use crate::query::kernel::ExecContext;
 use crate::query::plan::{IndexScanExpr, *};
 use crate::query::NaadanRecord;
-use crate::rc_ref_cell;
 use crate::server::SessionContext;
 use crate::storage::catalog::{Column, ColumnType, Offset, Table};
+use crate::storage::storage_engine::NaadanStorageEngine;
 use crate::storage::{NaadanError, StorageEngine};
 use crate::transaction::TransactionManager;
+use crate::{rc_ref_cell, transaction};
 
 use log::{debug, error};
 use sqlparser::ast::{Expr, SetExpr, Statement, TableFactor, Values};
@@ -81,62 +82,16 @@ impl fmt::Display for QueryResult {
     }
 }
 
-/// Execution context for the physical plan executor
-pub struct ExecContext {
-    last_result: Option<RecordSet>,
-    last_op_name: Option<String>,
-    last_op_time: Option<Duration>,
-    last_op_status: Option<bool>,
-
-    pub storage_engine: Option<Arc<Mutex<Box<dyn StorageEngine>>>>,
-}
-
-impl ExecContext {
-    pub fn init() -> Self {
-        Self {
-            last_result: None,
-            last_op_name: None,
-            last_op_time: None,
-            storage_engine: None,
-            last_op_status: None,
-        }
-    }
-
-    pub fn last_result(&self) -> Option<&RecordSet> {
-        self.last_result.as_ref()
-    }
-
-    pub fn set_storage_engine(&mut self, storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>) {
-        self.storage_engine = Some(storage_engine);
-    }
-    pub fn get_storage_engine(&mut self) -> Option<&Arc<Mutex<Box<dyn StorageEngine>>>> {
-        self.storage_engine.as_ref()
-    }
-
-    pub fn set_last_result(&mut self, last_result: Option<RecordSet>) {
-        self.last_result = last_result;
-    }
-
-    pub fn set_last_op_status(&mut self, last_op_status: Option<bool>) {
-        self.last_op_status = last_op_status;
-    }
-}
-
 /// The core query engine struct
 /// - It takes a reference to the global reference counted storage engine instance
-pub struct NaadanQueryEngine {
-    pub storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>,
-    pub transaction_manager: Arc<Mutex<TransactionManager>>,
+pub struct NaadanQueryEngine<E: StorageEngine> {
+    pub transaction_manager: Arc<Box<TransactionManager<E>>>,
 }
 
-impl NaadanQueryEngine {
+impl<E: StorageEngine> NaadanQueryEngine<E> {
     /// Initialize the query engine with the shared storage engine instance
-    pub async fn init(
-        storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>,
-        transaction_manager: Arc<Mutex<TransactionManager>>,
-    ) -> Self {
+    pub async fn init(transaction_manager: Arc<Box<TransactionManager<E>>>) -> Self {
         Self {
-            storage_engine: storage_engine,
             transaction_manager: transaction_manager,
         }
     }
@@ -169,10 +124,28 @@ impl NaadanQueryEngine {
         let query_str = statement.to_string();
         println!("Processing query: {}", query_str);
 
+        if session_context.current_transaction_id == 0 {
+            let transaction = self
+                .transaction_manager
+                .start_new_transaction(self.transaction_manager.clone())
+                .unwrap();
+            session_context.current_transaction_id = transaction.id();
+
+            println!(
+                "Starting new transaction for the session with t_id:{}",
+                session_context.current_transaction_id
+            );
+        }
+
         // Create logical plan for the query from the AST
         let logical_plan = match self.prepare_logical_plan(session_context, statement).await {
             Ok(val) => val,
-            Err(err) => return Some(Err(err)),
+            Err(err) => {
+                self.transaction_manager
+                    .rollback_transaction(session_context.current_transaction_id)
+                    .unwrap();
+                return Some(Err(err));
+            }
         };
         println!("Logical Plan is : {:?}", logical_plan);
 
@@ -182,7 +155,12 @@ impl NaadanQueryEngine {
             .await
         {
             Ok(val) => val,
-            Err(err) => return Some(Err(err)),
+            Err(err) => {
+                self.transaction_manager
+                    .rollback_transaction(session_context.current_transaction_id)
+                    .unwrap();
+                return Some(Err(err));
+            }
         };
         println!("Physical Plan is : {:?}", physical_plan);
 
@@ -194,13 +172,17 @@ impl NaadanQueryEngine {
     pub async fn execute<'a>(
         &self,
         session_context: &mut SessionContext,
-        physical_plan: Vec<PhysicalPlan<'a>>,
+        physical_plan: Vec<PhysicalPlan<'a, E>>,
     ) -> Result<QueryResult, NaadanError> {
         println!("Executing final query plan.");
 
         // TODO let the scheduler decide how and where the execution will take place.
         let mut exec_context = ExecContext::init();
-        exec_context.set_storage_engine(self.storage_engine.clone());
+
+        exec_context.set_transaction(
+            self.transaction_manager
+                .get_active_transaction(session_context.current_transaction_id),
+        );
 
         let begin_time = SystemTime::now();
         let now = Instant::now();
@@ -212,12 +194,18 @@ impl NaadanQueryEngine {
         let elapsed_time = now.elapsed();
 
         if exec_context.last_op_status.unwrap_or(true) {
+            self.transaction_manager
+                .commit_transaction(session_context.current_transaction_id)
+                .unwrap();
             Ok(QueryResult::new(
                 ExecStats::new(begin_time, elapsed_time),
                 exec_context.last_result,
                 None,
             ))
         } else {
+            self.transaction_manager
+                .rollback_transaction(session_context.current_transaction_id)
+                .unwrap();
             Err(NaadanError::QueryExecutionFailed)
         }
     }
@@ -226,8 +214,8 @@ impl NaadanQueryEngine {
         &'a self,
         session_context: &mut SessionContext,
         logical_plan: &Vec<Plan<'a>>,
-    ) -> Result<Vec<PhysicalPlan>, NaadanError> {
-        let mut exec_vec: Vec<PhysicalPlan> = Vec::new();
+    ) -> Result<Vec<PhysicalPlan<E>>, NaadanError> {
+        let mut exec_vec: Vec<PhysicalPlan<E>> = Vec::new();
 
         match logical_plan.last() {
             Some(plan) => {
@@ -238,19 +226,28 @@ impl NaadanQueryEngine {
                             let physical_plan_expr =
                                 PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
 
-                            exec_vec.push(PhysicalPlan::new(physical_plan_expr, scan_table));
+                            exec_vec.push(PhysicalPlan::<E>::new(
+                                physical_plan_expr,
+                                ExecContext::<E>::scan_table,
+                            ));
                         }
                         RelationalExprType::CreateTableExpr(_) => {
                             let physical_plan_expr =
                                 PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
 
-                            exec_vec.push(PhysicalPlan::new(physical_plan_expr, create_table));
+                            exec_vec.push(PhysicalPlan::<E>::new(
+                                physical_plan_expr,
+                                ExecContext::<E>::create_table,
+                            ));
                         }
                         RelationalExprType::InsertExpr(_) => {
                             let physical_plan_expr =
                                 PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
 
-                            exec_vec.push(PhysicalPlan::new(physical_plan_expr, insert_table));
+                            exec_vec.push(PhysicalPlan::<E>::new(
+                                physical_plan_expr,
+                                ExecContext::<E>::insert_table,
+                            ));
                         }
                         RelationalExprType::InnerJoinExpr(_, _, _) => todo!(),
                         RelationalExprType::FilterExpr(_) => todo!(),
@@ -259,7 +256,10 @@ impl NaadanQueryEngine {
                             let physical_plan_expr =
                                 PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
 
-                            exec_vec.push(PhysicalPlan::new(physical_plan_expr, update_table));
+                            exec_vec.push(PhysicalPlan::<E>::new(
+                                physical_plan_expr,
+                                ExecContext::<E>::update_table,
+                            ));
                         }
                     },
 
@@ -288,7 +288,7 @@ impl NaadanQueryEngine {
                 let mut column_map: HashMap<String, Column> = HashMap::new();
                 let table_name = name.0.last().unwrap().value.clone();
                 {
-                    let storage_instance = self.storage_engine.lock().await;
+                    let storage_instance = self.transaction_manager.storage_engine();
 
                     match storage_instance.get_table_details(&table_name) {
                         Ok(_) => {
@@ -364,7 +364,7 @@ impl NaadanQueryEngine {
                 let table_name = table_name.0.last().unwrap().value.clone();
 
                 {
-                    let storage_instance = self.storage_engine.lock().await;
+                    let storage_instance = self.transaction_manager.storage_engine();
 
                     match storage_instance.get_table_details(&table_name) {
                         Ok(table_schema) => {
@@ -413,7 +413,7 @@ impl NaadanQueryEngine {
                     _ => {}
                 }
 
-                let storage_instance = self.storage_engine.lock().await;
+                let storage_instance = self.transaction_manager.storage_engine();
 
                 match storage_instance.get_table_details(&table_name) {
                     Ok(table_schema) => {
@@ -449,22 +449,15 @@ impl NaadanQueryEngine {
                 begin,
                 modifier,
             } => {
-                let mut transaction_manager = task::block_in_place(|| {
-                    println!("Locking transaction_manager {:?}", SystemTime::now());
-                    self.transaction_manager.blocking_lock()
-                });
-
-                let new_transaction = transaction_manager.start_new_transaction().unwrap();
+                let new_transaction = self
+                    .transaction_manager
+                    .start_new_transaction(self.transaction_manager.clone())
+                    .unwrap();
                 session_context.set_current_transaction_id(new_transaction.id());
             }
             Statement::Rollback { chain, savepoint } => {
-                let mut transaction_manager = task::block_in_place(|| {
-                    println!("Locking transaction_manager {:?}", SystemTime::now());
-                    self.transaction_manager.blocking_lock()
-                });
-
                 if session_context.current_transaction_id > 0 {
-                    transaction_manager
+                    self.transaction_manager
                         .rollback_transaction(session_context.current_transaction_id)
                         .unwrap();
                 } else {
@@ -472,13 +465,8 @@ impl NaadanQueryEngine {
                 }
             }
             Statement::Commit { chain } => {
-                let mut transaction_manager = task::block_in_place(|| {
-                    println!("Locking transaction_manager {:?}", SystemTime::now());
-                    self.transaction_manager.blocking_lock()
-                });
-
                 if session_context.current_transaction_id > 0 {
-                    transaction_manager
+                    self.transaction_manager
                         .commit_transaction(session_context.current_transaction_id)
                         .unwrap();
                 } else {
@@ -496,7 +484,7 @@ impl NaadanQueryEngine {
                 match &*query_data.body {
                     SetExpr::Select(select_query) => {
                         //  Get the query target Tables as in the 'FROM' expression
-                        let result = self.prepare_select_query_plan(select_query);
+                        let result = self.prepare_select_query_plan(select_query).await;
                         let expr_group = match result {
                             Ok(val) => val,
                             Err(err) => {
@@ -540,7 +528,7 @@ impl NaadanQueryEngine {
         Ok(final_plan_list)
     }
 
-    fn prepare_select_query_plan(
+    async fn prepare_select_query_plan(
         self: &Self,
         select_query: &Box<sqlparser::ast::Select>,
     ) -> Result<Vec<Edge<PlanGroup>>, NaadanError> {
@@ -553,7 +541,7 @@ impl NaadanQueryEngine {
                     {
                         let storage_instance = task::block_in_place(move || {
                             println!("Locking storage_instance {:?}", SystemTime::now());
-                            self.storage_engine.blocking_lock()
+                            self.transaction_manager.storage_engine()
                             // do some compute-heavy work or call synchronous code
                         });
 

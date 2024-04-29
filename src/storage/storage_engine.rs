@@ -1,21 +1,28 @@
 use sqlparser::ast::Expr;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
+use tokio::{
+    sync::{Mutex, RwLock, RwLockReadGuard},
+    task,
+};
 
 use super::{
     page::{CatalogPage, Page, PageId},
     CatalogEngine, NaadanError, RowIdType, StorageEngine, TableIdType,
 };
-use crate::query::RecordSet;
+use crate::query::{NaadanRecord, RecordSet};
 use crate::storage::catalog::*;
 
 /// Storage Engine
 #[derive(Debug)]
 pub struct NaadanStorageEngine {
-    pub(crate) catalog_page: HashMap<usize, Page>,
-    pub(crate) buffer_pool: BufferPool,
-    pub(crate) row_index: HashMap<usize, PageId>,
-    pub(crate) table_index: HashMap<TableIdType, TableMetadata>,
-    pub(crate) engine_metadata: StorageEngineMetadata,
+    pub(crate) catalog_page: RwLock<HashMap<usize, Page>>,
+    pub(crate) buffer_pool: RwLock<BufferPool>,
+    pub(crate) row_index: RwLock<HashMap<u64, PageId>>,
+    pub(crate) table_index: RwLock<HashMap<TableIdType, TableMetadata>>,
+    pub(crate) engine_metadata: RwLock<StorageEngineMetadata>,
 }
 
 impl NaadanStorageEngine {
@@ -29,170 +36,259 @@ impl NaadanStorageEngine {
         let row_index = HashMap::new();
 
         Self {
-            buffer_pool,
-            row_index,
-            engine_metadata: StorageEngineMetadata::new(table_count as usize),
-            catalog_page: HashMap::from([(1, catalog_page)]),
-            table_index: HashMap::new(),
+            buffer_pool: RwLock::new(buffer_pool),
+            row_index: RwLock::new(row_index),
+            engine_metadata: RwLock::new(StorageEngineMetadata::new(table_count as usize)),
+            catalog_page: RwLock::new(HashMap::from([(1, catalog_page)])),
+            table_index: RwLock::new(HashMap::new()),
         }
     }
 }
 
 impl StorageEngine for NaadanStorageEngine {
+    type ScanIterator<'a> = ScanIterator<'a>;
+
     fn write_table_rows(
-        &mut self,
+        &self,
         row_values: RecordSet,
         table: &Table,
     ) -> Result<RowIdType, NaadanError> {
-        let mut table_pages: Vec<PageId> = vec![];
-        let mut page_id: PageId;
-        let mut row_id: u32;
+        task::block_in_place(|| {
+            let mut table_pages: Vec<PageId> = vec![];
+            let mut page_id: PageId;
+            let mut row_id: u32;
 
-        // println!("Storage engine: {:?}", self);
-        let page: &mut Page = match self.table_index.get_mut(&(table.id as usize)) {
-            Some(val) => {
-                table_pages.append(&mut val.page_ids.clone());
-                page_id = table_pages.last().unwrap().clone();
-                // TODO: make these updated atomic
-                row_id = val.row_count + 1;
-                val.row_count += row_values.count() as u32;
-                let page = self.buffer_pool.page_pool.get_mut(&page_id).unwrap();
-                // TODO: check if the page has enough space
-                page
-            }
-            None => {
-                page_id = PageId::new(table.id, 1);
-                row_id = 1;
-                let page = Page::new_with_capacity(8 * 1024);
-                self.buffer_pool.page_pool.insert(page_id, page);
-                self.table_index.insert(
-                    table.id as usize,
-                    TableMetadata {
-                        page_ids: vec![page_id],
-                        row_count: row_values.count() as u32,
-                    },
-                );
-                let page = self.buffer_pool.page_pool.get_mut(&page_id).unwrap();
-                page
-            }
-        };
+            // println!("Storage engine: {:?}", self);
 
-        let row_end: u32 = page.write_table_row(row_id, row_values, table).unwrap() as u32;
-        page.write_to_disk(page_id).unwrap();
+            let mut table_index = self.table_index.blocking_write();
+            let mut row_index = self.row_index.blocking_write();
+            let mut buffer_pool = self.buffer_pool.blocking_write();
 
-        for r_id in row_id..row_end {
-            self.row_index.insert(r_id as usize, page_id);
-        }
+            let page: &mut Page = match table_index.get_mut(&(table.id as usize)) {
+                Some(val) => {
+                    table_pages.append(&mut val.page_ids.clone());
+                    page_id = table_pages.last().unwrap().clone();
+                    // TODO: make these updated atomic
+                    row_id = val.row_count + 1;
+                    val.row_count += row_values.count() as u32;
 
-        println!("{:?}", self.row_index);
+                    let p = buffer_pool.page_pool.get_mut(&page_id).unwrap();
+                    // TODO: check if the page has enough space
+                    p
+                }
+                None => {
+                    page_id = PageId::new(table.id, 1);
+                    row_id = 1;
 
-        let read_page = Page::read_from_disk(page_id).unwrap();
-        read_page.read_table_row(&(row_id as usize), table).unwrap();
+                    let page = Page::new_with_capacity(8 * 1024);
+                    buffer_pool.page_pool.insert(page_id, page);
 
-        //println!("{:?}", page);
+                    table_index.insert(
+                        table.id as usize,
+                        TableMetadata {
+                            page_ids: vec![page_id],
+                            row_count: row_values.count() as u32,
+                        },
+                    );
 
-        Ok(row_id as usize)
-    }
+                    let page = buffer_pool.page_pool.get_mut(&page_id).unwrap();
 
-    fn read_table_rows(&self, row_ids: &[usize], schema: &Table) -> Result<RecordSet, NaadanError> {
-        let mut rows = RecordSet::new(vec![]);
-
-        for r_id in row_ids {
-            let page_id = match self.row_index.get(r_id) {
-                Some(pageid) => pageid,
-                None => return Ok(RecordSet::new(vec![])),
+                    page
+                }
             };
 
-            let page = self.buffer_pool.get(&page_id).unwrap();
-            let row = page.read_table_row(&r_id, schema).unwrap();
+            let row_end: u32 = page.write_table_row(row_id, row_values, table).unwrap() as u32;
+            page.write_to_disk(page_id).unwrap();
 
-            rows.add_record(row);
-        }
+            for r_id in row_id..row_end {
+                row_index.insert(r_id as u64, page_id);
+            }
 
-        Ok(rows)
+            println!("{:?}", self.row_index);
+
+            Ok(row_id as usize)
+        })
     }
 
-    fn delete_table_rows(
-        &self,
-        row_ids: &[usize],
-        schema: &Table,
-    ) -> Result<RecordSet, NaadanError> {
+    /// This will block on read lock for storage layer structures
+    fn read_table_rows<'a>(&'a self, row_ids: &'a [u64], schema: &'a Table) -> ScanIterator {
+        let row_index_guard = self.row_index.blocking_read();
+        let buffer_pool_guard = self.buffer_pool.blocking_read();
+
+        let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
+        ScanIterator::new(ScanType::ExplicitRowScan(row_ids), schema, guard)
+    }
+
+    fn delete_table_rows(&self, row_ids: &[u64], schema: &Table) -> Result<RecordSet, NaadanError> {
         todo!()
     }
 
     fn update_table_rows(
-        &mut self,
-        row_ids: Option<Vec<usize>>,
-        updated_columns: HashMap<String, Expr>,
+        &self,
+        row_ids: Option<Vec<u64>>,
+        updated_columns: &HashMap<String, Expr>,
         schema: &Table,
     ) -> Result<&[RowIdType], NaadanError> {
-        let row_id_list = match row_ids {
-            Some(val) => val,
-            None => {
-                let table_metadata = self.table_index.get(&(schema.id as usize)).unwrap();
-                Vec::from_iter(1..table_metadata.row_count as usize + 1)
-            }
-        };
-
-        for r_id in &row_id_list {
-            let page_id = match self.row_index.get(r_id) {
-                Some(pageid) => pageid,
-                None => continue,
+        task::block_in_place(|| {
+            let table_index = self.table_index.blocking_read();
+            let row_id_list = match row_ids {
+                Some(val) => val,
+                None => {
+                    let table_metadata = table_index.get(&(schema.id as usize)).unwrap();
+                    Vec::from_iter(1..table_metadata.row_count as u64 + 1)
+                }
             };
 
-            let page = self.buffer_pool.get_mut(&page_id).unwrap();
-            page.update_table_row(&r_id, &updated_columns, schema)
-                .unwrap();
-        }
+            let row_index = self.row_index.blocking_read();
+            let mut buffer_pool = self.buffer_pool.blocking_write();
 
-        Ok(&[0])
+            for r_id in &row_id_list {
+                let page_id = match row_index.get(r_id) {
+                    Some(pageid) => pageid,
+                    None => continue,
+                };
+
+                let page = buffer_pool.get_mut(&page_id).unwrap();
+
+                // TODO: Write transaction row version chain for current rowid
+                page.update_table_row(r_id, &updated_columns, schema)
+                    .unwrap();
+            }
+
+            Ok([0 as usize].as_slice())
+        })
     }
 
-    fn scan_table(
-        &self,
+    /// This will block on read lock for storage layer structures
+    fn scan_table<'a>(
+        &'a self,
         predicate: Option<crate::query::plan::ScalarExprType>,
-        schema: &Table,
-    ) -> Result<RecordSet, NaadanError> {
+        schema: &'a Table,
+    ) -> ScanIterator {
         let mut row_collection: RecordSet = RecordSet::new(vec![]);
+        let row_index_guard = self.row_index.blocking_read();
+        let buffer_pool_guard = self.buffer_pool.blocking_read();
 
-        match self.table_index.get(&(schema.id as usize)) {
-            Some(val) => {
-                for r_id in 1..val.row_count + 1 {
-                    let page_id = self.row_index.get(&(r_id as usize)).unwrap();
-                    let page = self.buffer_pool.get(&page_id).unwrap();
+        let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
+        let row_count = self
+            .table_index
+            .blocking_read()
+            .get(&(schema.id as usize))
+            .unwrap()
+            .row_count as u64;
 
-                    // TODO: push down predicate
-                    let row = page.read_table_row(&(r_id as usize), schema).unwrap();
+        ScanIterator::new(ScanType::FullScan(row_count), schema, guard)
+    }
+}
 
-                    row_collection.add_record(row);
-                }
+enum ScanType<'a> {
+    FullScan(u64),
+    ExplicitRowScan(&'a [u64]),
+}
+struct ScanGuard<'a> {
+    row_index_guard: Option<RwLockReadGuard<'a, HashMap<u64, PageId>>>,
+    buffer_pool_guard: Option<RwLockReadGuard<'a, BufferPool>>,
+    //table_index_guard:  Option<RwLockReadGuard<'a, HashMap<TableIdType, TableMetadata>>>,
+}
+
+impl<'a> ScanGuard<'a> {
+    fn new(
+        row_index_guard: Option<RwLockReadGuard<'a, HashMap<u64, PageId>>>,
+        buffer_pool_guard: Option<RwLockReadGuard<'a, BufferPool>>,
+    ) -> Self {
+        Self {
+            row_index_guard,
+            buffer_pool_guard,
+        }
+    }
+}
+
+pub struct ScanIterator<'a> {
+    scan_type: ScanType<'a>,
+    current_index: usize,
+    guard: ScanGuard<'a>,
+    schema: &'a Table,
+}
+
+impl<'a> ScanIterator<'a> {
+    fn new(scan_type: ScanType<'a>, schema: &'a Table, guard: ScanGuard<'a>) -> Self {
+        Self {
+            scan_type,
+            current_index: 0,
+            guard,
+            schema,
+        }
+    }
+}
+
+impl<'a> Iterator for ScanIterator<'a> {
+    type Item = Result<NaadanRecord, NaadanError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let row_id_vec: Vec<u64>;
+        let row_ids = match self.scan_type {
+            ScanType::FullScan(row_count) => {
+                row_id_vec = (1..row_count + 1).collect::<Vec<u64>>();
+                row_id_vec.as_slice()
             }
-            _ => return Err(NaadanError::TableNotFound),
+            ScanType::ExplicitRowScan(row_ids) => row_ids,
         };
 
-        Ok(row_collection)
+        let row_id = match row_ids.get(self.current_index) {
+            Some(row_id) => row_id,
+            None => return None,
+        };
+
+        let page_id = match self.guard.row_index_guard.as_ref().unwrap().get(row_id) {
+            Some(pageid) => pageid,
+            None => return Some(Err(NaadanError::RowNotFound)),
+        };
+
+        let page = self
+            .guard
+            .buffer_pool_guard
+            .as_ref()
+            .unwrap()
+            .get(&page_id)
+            .unwrap();
+        let row = page.read_table_row(row_id, self.schema).unwrap();
+        self.current_index += 1;
+
+        Some(Ok(row))
     }
 }
 
 impl CatalogEngine for NaadanStorageEngine {
     fn get_table_details(&self, name: &String) -> Result<Table, NaadanError> {
-        self.catalog_page.get(&1).unwrap().get_table_details(name)
+        task::block_in_place(|| {
+            self.catalog_page
+                .blocking_read()
+                .get(&1)
+                .unwrap()
+                .get_table_details(name)
+        })
     }
 
-    fn add_table_details(&mut self, table: &mut Table) -> Result<TableIdType, NaadanError> {
-        let catalog_page = self.catalog_page.get_mut(&1).unwrap();
-        table.id = self.engine_metadata.table_count as u16 + 1;
-        self.engine_metadata.table_count += 1;
-        match catalog_page.write_table_details(table) {
-            Ok(_) => {}
-            Err(err) => return Err(err),
-        }
-        match catalog_page.write_catalog_to_disk() {
-            Ok(_) => {}
-            Err(err) => return Err(err),
-        }
+    fn add_table_details(&self, table: &mut Table) -> Result<TableIdType, NaadanError> {
+        task::block_in_place(|| {
+            let mut catalog_page_map = self.catalog_page.blocking_write();
+            let catalog_page = catalog_page_map.get_mut(&1).unwrap();
+            table.id = self.engine_metadata.blocking_read().table_count as u16 + 1;
+            {
+                let mut engine_metadata = self.engine_metadata.blocking_write();
+                engine_metadata.table_count += 1;
+            }
+            match catalog_page.write_table_details(table) {
+                Ok(_) => {}
+                Err(err) => return Err(err),
+            }
+            match catalog_page.write_catalog_to_disk() {
+                Ok(_) => {}
+                Err(err) => return Err(err),
+            }
 
-        Ok(10)
+            Ok(10)
+        })
     }
 
     fn delete_table_details(&self, name: &String) -> Result<Table, NaadanError> {
