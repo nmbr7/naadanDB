@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 use crate::{
     query::{query_engine::NaadanQueryEngine, NaadanQuery},
-    storage::{storage_engine::NaadanStorageEngine, NaadanError, StorageEngine},
+    storage::{
+        storage_engine::{self, NaadanStorageEngine},
+        NaadanError, StorageEngine,
+    },
     transaction::TransactionManager,
 };
 
@@ -22,20 +25,27 @@ pub struct ServerConfig {
 }
 
 #[derive(Debug)]
-pub struct NaadanServer {
+pub struct NaadanServer<E: StorageEngine + 'static> {
     pub config: ServerConfig,
-    pub storage_engine: Arc<Mutex<Box<dyn StorageEngine>>>,
-    pub transaction_manager: Arc<Mutex<TransactionManager>>,
+    pub transaction_manager: Arc<Box<TransactionManager<E>>>,
 }
 
 #[derive(Debug)]
 pub struct SessionContext {
     pub current_transaction_id: u64,
+    pub transaction_type: TransactionType,
+}
+
+#[derive(Debug)]
+pub enum TransactionType {
+    Implicit,
+    Explicit,
 }
 
 impl SessionContext {
     pub fn new() -> Self {
         Self {
+            transaction_type: TransactionType::Implicit,
             current_transaction_id: 0,
         }
     }
@@ -45,12 +55,13 @@ impl SessionContext {
     }
 }
 
-impl NaadanServer {
-    pub fn setup(server_config: ServerConfig) -> Self {
+impl<E: StorageEngine + Send + Sync> NaadanServer<E> {
+    pub fn setup(server_config: ServerConfig, storage_engine: Arc<Box<E>>) -> Self {
+        let transaction_manager = Arc::new(Box::new(TransactionManager::init(storage_engine)));
+
         NaadanServer {
             config: server_config,
-            storage_engine: Arc::new(Mutex::new(Box::new(NaadanStorageEngine::init(1024)))),
-            transaction_manager: Arc::new(Mutex::new(TransactionManager::init())),
+            transaction_manager: transaction_manager,
         }
     }
 
@@ -82,7 +93,7 @@ impl NaadanServer {
     }
 
     async fn process_request(
-        server_instance: Arc<NaadanServer>,
+        server_instance: Arc<NaadanServer<E>>,
         mut socket: TcpStream,
         _n: usize,
     ) -> Result<(), NaadanError> {
@@ -109,11 +120,8 @@ impl NaadanServer {
             };
 
             // Init a new query engine instance with reference to the global shared storage engine
-            let query_engine = NaadanQueryEngine::init(
-                server_instance.storage_engine.clone(),
-                server_instance.transaction_manager.clone(),
-            )
-            .await;
+            let query_engine =
+                NaadanQueryEngine::init(server_instance.transaction_manager.clone()).await;
 
             let mut session_context = SessionContext::new();
 

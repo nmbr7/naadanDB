@@ -1,18 +1,25 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
+    future::{self, Future},
+    process::Output,
     rc::{Rc, Weak},
     time::Duration,
 };
 
 use sqlparser::ast::Expr;
+use tokio::task::futures;
 
 use crate::{
     rc_ref_cell,
-    storage::catalog::{Column, Table},
+    storage::{
+        catalog::{Column, Table},
+        StorageEngine,
+    },
+    transaction::MvccTransaction,
 };
 
-use super::{query_engine::ExecContext, RecordSet};
+use super::{kernel::ExecContext, RecordSet};
 
 pub type Edge<T> = Rc<RefCell<T>>;
 type WeakEdge<T> = Weak<RefCell<T>>;
@@ -139,16 +146,16 @@ pub enum PhysicalPlanExpr<'a> {
     Scalar(ScalarExprType),
 }
 
-pub type PlanExecFn = fn(context: &mut ExecContext, PhysicalPlanExpr);
+pub type PlanExecFn<E> = fn(context: &mut ExecContext<E>, PhysicalPlanExpr);
 
 #[derive(Debug)]
-pub struct PhysicalPlan<'a> {
+pub struct PhysicalPlan<'a, E: StorageEngine> {
     pub plan_expr: PhysicalPlanExpr<'a>,
-    pub plane_exec_fn: PlanExecFn,
+    pub plane_exec_fn: PlanExecFn<E>,
 }
 
-impl<'a> PhysicalPlan<'a> {
-    pub fn new(plan_expr: PhysicalPlanExpr<'a>, plane_exec_fn: PlanExecFn) -> Self {
+impl<'a, E: StorageEngine> PhysicalPlan<'a, E> {
+    pub fn new(plan_expr: PhysicalPlanExpr<'a>, plane_exec_fn: PlanExecFn<E>) -> Self {
         Self {
             plan_expr,
             plane_exec_fn,
@@ -156,9 +163,9 @@ impl<'a> PhysicalPlan<'a> {
     }
 }
 
-unsafe impl<'a> Send for PhysicalPlan<'a> {}
+unsafe impl<'a, E: StorageEngine> Send for PhysicalPlan<'a, E> {}
 
-unsafe impl<'a> Sync for PhysicalPlan<'a> {}
+unsafe impl<'a, E: StorageEngine> Sync for PhysicalPlan<'a, E> {}
 
 #[derive(Debug)]
 pub struct Relational<'a> {
