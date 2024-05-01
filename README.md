@@ -31,15 +31,11 @@ Run `cargo test -- --nocapture` to run the UTs with console output.
 
 # Design
 
-```
-              --------------------------------------------------------------------------------------------------
-Query ----> | Parser -> [AST] -> Logical Plan -> Physical Plan -> Executor -> Transaction layer -> Storage Layer|
-              --------------------------------------------------------------------------------------------------
-```
+## Query Flow
 
-Most of the core components are written from scratch except for the parser.
+<img width="1108" alt="image" src="https://github.com/nmbr7/naadanDB/assets/19748270/93520ffe-a20c-4219-beab-b0b517061650">
 
-- For the parse we use the [sqlparser](https://crates.io/crates/sqlparser) crate.
+Most of the core components are written from scratch except for the parser, for which we use the [sqlparser](https://crates.io/crates/sqlparser) crate.
 
 ## Components
 
