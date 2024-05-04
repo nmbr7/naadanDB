@@ -4,7 +4,7 @@ pub mod page;
 pub mod storage_engine;
 mod utils;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use sqlparser::ast::Expr;
 use thiserror::Error;
@@ -37,6 +37,8 @@ pub enum NaadanError {
 
     #[error("Query not in a valid transaction session")]
     TransactionSessionInvalid,
+    #[error("Transaction aborted")]
+    TransactionAborted,
 
     #[error("Physical plan creation failed")]
     PhysicalPlanFailed,
@@ -53,7 +55,7 @@ pub enum NaadanError {
     Unknown,
 }
 
-pub type RowIdType = usize;
+pub type RowIdType = u64;
 pub type TableIdType = usize;
 
 /// Trait interface for DB schema operations.
@@ -68,6 +70,11 @@ pub trait CatalogEngine {
     fn delete_table_details(&self, name: &String) -> Result<Table, NaadanError>;
 }
 
+pub enum ScanType {
+    Filter(crate::query::plan::ScalarExprType),
+    RowIds(Vec<u64>),
+    Full,
+}
 /// Trait interface for all storage operations.
 pub trait StorageEngine: CatalogEngine + std::fmt::Debug + Send {
     type ScanIterator<'a>: Iterator<Item = Result<NaadanRecord, NaadanError>>
@@ -82,16 +89,9 @@ pub trait StorageEngine: CatalogEngine + std::fmt::Debug + Send {
     ) -> Result<RowIdType, NaadanError>;
 
     /// Retrieve rows from a table
-    fn read_table_rows<'a>(
-        &'a self,
-        row_ids: &'a [u64],
-        schema: &'a Table,
-    ) -> Self::ScanIterator<'_>;
-
-    /// Retrieve rows from a table
     fn scan_table<'a>(
         &'a self,
-        predicate: Option<ScalarExprType>,
+        scan_types: &'a ScanType,
         schema: &'a Table,
     ) -> Self::ScanIterator<'_>;
 
@@ -99,10 +99,10 @@ pub trait StorageEngine: CatalogEngine + std::fmt::Debug + Send {
     fn delete_table_rows(&self, row_ids: &[u64], schema: &Table) -> Result<RecordSet, NaadanError>;
 
     /// Update rows from a table
-    fn update_table_rows(
+    fn update_table_rows<'a>(
         &self,
-        row_ids: Option<Vec<u64>>,
-        updates_columns: &HashMap<String, Expr>,
+        scan_types: &'a ScanType,
+        updates_columns: &BTreeMap<String, Expr>,
         schema: &Table,
-    ) -> Result<&[RowIdType], NaadanError>;
+    ) -> Result<Vec<RowIdType>, NaadanError>;
 }

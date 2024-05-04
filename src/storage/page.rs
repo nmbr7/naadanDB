@@ -8,14 +8,18 @@ use log::debug;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Expr, Values};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::File,
     io::{Cursor, Read, Seek, Write},
     ops::{Shl, Shr},
     vec,
 };
 
-use crate::{query::RecordSet, storage::utils::write_string_to_buf, utils::log};
+use crate::{
+    query::{NaadanRecord, RecordSet},
+    storage::utils::write_string_to_buf,
+    utils::{self, log},
+};
 
 const DB_DATAFILE: &str = "/tmp/DB_data_file.bin";
 const DB_TABLE_CATALOG_FILE: &str = "/tmp/DB_table_catalog_file.bin";
@@ -211,7 +215,10 @@ impl CatalogPage for Page {
     }
 
     fn write_table_details(&mut self, table: &Table) -> Result<usize, NaadanError> {
-        println!("Creating new table with details {:?}", table);
+        utils::log(
+            "Page".to_string(),
+            format!("Creating new table with details {:?}", table),
+        );
         let split_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
         let data = &mut self.data;
 
@@ -247,7 +254,10 @@ impl CatalogPage for Page {
             || (dyn_cursor_base + table.name.len() as u64 + 2 + table.schema.len() as u64 * 4 * 64)
                 >= self.header.page_capacity as u64
         {
-            println!("Buffer full cursor at {}", cursor_base);
+            utils::log(
+                "Page".to_string(),
+                format!("Buffer full cursor at {}", cursor_base),
+            );
             return Err(NaadanError::TableAddFailed);
         }
 
@@ -414,16 +424,19 @@ impl Page {
     /// Write a new row into the table page
     pub fn write_table_row(
         &mut self,
-        mut row_id: u32,
+        mut row_id: u64,
         row_data: RecordSet,
         schema: &Table,
     ) -> Result<usize, NaadanError> {
-        log(format!("Writing row {} to page", row_id));
+        utils::log(
+            "Page".to_string(),
+            format!("Writing row {} to page", row_id),
+        );
         // TODO: If there are no variable length attribute in the schema,
         //       then remove the dynamic sized buffer space.
         let var_len_buf_offset: u64 = self.header.page_capacity as u64 * 1 / 4;
 
-        //println!("Page Data {:?}", self.data);
+        //utils::utils::log("Page".to_string(),format!("Page Data {:?}", self.data));
         let data = &mut self.data;
 
         let mut buf_cursor = Cursor::new(&mut data.data);
@@ -437,7 +450,7 @@ impl Page {
 
         // TODO: check the available space
         for row in row_data {
-            for (index, column) in row.iter().enumerate() {
+            for (index, column) in row.columns().iter().enumerate() {
                 data.offset
                     .insert(index as u32, buf_cursor.position() as u32);
                 if let Some(value) =
@@ -446,7 +459,7 @@ impl Page {
                     return value;
                 }
             }
-            println!("Done inserting row {}", row_id);
+            utils::log("Page".to_string(), format!("Done inserting row {}", row_id));
 
             self.header
                 .offset
@@ -460,8 +473,8 @@ impl Page {
     }
 
     /// Read a row from the table page
-    pub fn read_table_row(&self, row_id: &u64, table: &Table) -> Result<Vec<Expr>, NaadanError> {
-        log(format!("Read row {} from page", row_id));
+    pub fn read_table_row(&self, row_id: &u64, table: &Table) -> Result<NaadanRecord, NaadanError> {
+        utils::log("Page".to_string(), format!("Read row {} from page", row_id));
         let row_offset = *self.header.offset.get(&(*row_id as u32)).unwrap() as u64;
 
         let data = &self.data;
@@ -476,22 +489,37 @@ impl Page {
             read_column_value(c_type, c_name, &mut buf_cursor, &mut row);
         }
 
-        Ok(row.iter().map(|val| val.1.clone()).collect::<Vec<Expr>>())
+        let mut column_names: Vec<String> = Vec::new();
+
+        let columns = row
+            .iter()
+            .map(|val| {
+                let column = val.1.clone();
+                column_names.push(val.0.clone());
+                column
+            })
+            .collect::<Vec<Expr>>();
+
+        Ok(NaadanRecord::new_with_column_names(
+            *row_id,
+            columns,
+            column_names,
+        ))
     }
 
     /// Update a row in the table page
     pub fn update_table_row(
         &mut self,
-        row_id: &u64,
-        updated_columns: &HashMap<String, Expr>,
+        row_id: u64,
+        updated_columns: &BTreeMap<String, Expr>,
         table: &Table,
         //row_handler: F,
     ) -> Result<(), NaadanError>
 // where
     //     F: FnOnce(&Expr) -> Result<R, NaadanError>,
     {
-        log(format!("Read row {} from page", row_id));
-        let row_offset = *self.header.offset.get(&(*row_id as u32)).unwrap() as u64;
+        utils::log("Page".to_string(), format!("Read row {} from page", row_id));
+        let row_offset = *self.header.offset.get(&(row_id as u32)).unwrap() as u64;
 
         let data = &mut self.data;
         let mut buf_cursor = Cursor::new(&mut data.data);
@@ -522,7 +550,10 @@ impl Page {
 
     /// Write a page to disk
     pub fn write_to_disk(&self, page_id: PageId) -> Result<(), NaadanError> {
-        log(format!("Flushing Data: {:?} to disk.", self));
+        utils::log(
+            "Page".to_string(),
+            format!("Flushing Data: {:?} to disk.", self),
+        );
         let table_data_file = String::from(DB_TABLE_DATA_FILE)
             .replace("{table_id}", page_id.get_table_id().to_string().as_str());
 
@@ -565,10 +596,10 @@ impl Page {
 
     /// Read a page from disk
     pub fn read_from_disk(page_id: PageId) -> Result<Page, NaadanError> {
-        log(format!(
-            "Reading page with id: {} from disk",
-            page_id.get_page_id()
-        ));
+        utils::log(
+            "Page".to_string(),
+            format!("Reading page with id: {} from disk", page_id.get_page_id()),
+        );
 
         let table_data_file = String::from(DB_TABLE_DATA_FILE)
             .replace("{table_id}", page_id.get_table_id().to_string().as_str());
@@ -675,7 +706,10 @@ fn write_column_value(
             _ => {}
         },
         _ => {
-            println!("Table insert source is not explicit values.");
+            utils::log(
+                "Page".to_string(),
+                format!("Table insert source is not explicit values."),
+            );
             return Some(Err(NaadanError::RowAddFailed));
         }
     }
@@ -771,9 +805,12 @@ mod tests {
 
             match page.write_table_details(&table) {
                 Ok(size) => {
-                    //println!("Data buffer: {:?}", page.data.get(&0).unwrap());
+                    //utils::utils::log("Page".to_string(),format!("Data buffer: {:?}", page.data.get(&0).unwrap()));
                     // if i % 100000 == 0 {
-                    println!("Wrote table {} details at Offset: {}", i, size);
+                    utils::log(
+                        "Page".to_string(),
+                        format!("Wrote table {} details at Offset: {}", i, size),
+                    );
                     // }
                 }
                 Err(_) => break,

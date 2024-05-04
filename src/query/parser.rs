@@ -5,21 +5,29 @@ use sqlparser::{
     parser::{Parser, ParserError},
 };
 
+use crate::utils;
+
 pub struct NaadanParser;
 impl NaadanParser {
     pub fn parse(query: &str) -> Result<Vec<Statement>, ParserError> {
-        println!(
-            "\n ==============\nParsing query {:?} Started\n ==============",
-            query
+        utils::log(
+            "Parser".to_string(),
+            format!(
+                "============== Parsing query {:?} Started ==============",
+                query,
+            ),
         );
 
         let dialect = GenericDialect {}; // or AnsiDialect, or your own dialect ...
         let ast = Parser::parse_sql(&dialect, query)?;
 
-        println!("Parsed AST is {:?}\n", ast);
-        println!(
-            "\n ==============\nParsing query {:?} Finished\n ==============",
-            query
+        utils::log("Parser".to_string(), format!("Parsed AST is {:?}\n", ast));
+        utils::log(
+            "Parser".to_string(),
+            format!(
+                "============== Parsing query {:?} Finished ==============",
+                query
+            ),
         );
         Ok(ast)
     }

@@ -11,7 +11,58 @@ pub mod plan;
 pub mod query_engine;
 
 /// Represents a row in a DB table (a collection of [`Expr`] type)
-pub type NaadanRecord = Vec<Expr>;
+#[derive(Debug, Clone)]
+pub struct NaadanRecord {
+    row_id: u64,
+    columns: Vec<Expr>,
+    column_names: Option<Vec<String>>,
+}
+
+impl NaadanRecord {
+    pub fn new(row_id: u64, columns: Vec<Expr>) -> Self {
+        Self {
+            row_id,
+            columns,
+            column_names: None,
+        }
+    }
+
+    pub fn new_with_column_names(
+        row_id: u64,
+        columns: Vec<Expr>,
+        column_names: Vec<String>,
+    ) -> Self {
+        Self {
+            row_id,
+            columns,
+            column_names: Some(column_names),
+        }
+    }
+
+    pub fn columns(&self) -> &[Expr] {
+        &self.columns
+    }
+
+    pub fn row_id(&self) -> u64 {
+        self.row_id
+    }
+
+    pub fn update_column_value(&mut self, column: (&String, &Expr)) {
+        let column_index = self
+            .column_names
+            .as_ref()
+            .unwrap()
+            .iter()
+            .position(|val| val == column.0)
+            .unwrap();
+
+        self.columns[column_index] = column.1.clone();
+    }
+
+    pub fn set_column_names(&mut self, column_names: Option<Vec<String>>) {
+        self.column_names = column_names;
+    }
+}
 
 /// Represents a collection of rows.
 #[derive(Debug, Clone)]
@@ -37,9 +88,9 @@ impl RecordSet {
 }
 
 impl<'a> IntoIterator for &'a RecordSet {
-    type Item = &'a Vec<Expr>;
+    type Item = &'a NaadanRecord;
 
-    type IntoIter = slice::Iter<'a, Vec<Expr>>;
+    type IntoIter = slice::Iter<'a, NaadanRecord>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.records.iter()
@@ -47,7 +98,7 @@ impl<'a> IntoIterator for &'a RecordSet {
 }
 
 impl IntoIterator for RecordSet {
-    type Item = Vec<Expr>;
+    type Item = NaadanRecord;
 
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
@@ -59,9 +110,9 @@ impl IntoIterator for RecordSet {
 impl fmt::Display for RecordSet {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut query_result = String::new();
-        self.records.iter().for_each(|r| {
-            let rr: Vec<String> = r.iter().map(|val| val.to_string()).collect();
-            query_result += rr.join(", ").as_str();
+        self.records.iter().for_each(|row| {
+            let columns: Vec<String> = row.columns.iter().map(|val| val.to_string()).collect();
+            query_result += columns.join(", ").as_str();
             query_result += "\n";
         });
 

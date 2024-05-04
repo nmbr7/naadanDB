@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     future::{self, Future},
     process::Output,
     rc::{Rc, Weak},
@@ -34,15 +34,15 @@ pub enum ScanType {
 pub struct ScanExpr {
     pub schema: Table,
     pub predicate: Option<ScalarExprType>,
-    pub op: ScanType,
+    pub scan_type: ScanType,
 }
 
 impl ScanExpr {
-    pub fn new(schema: Table, predicate: Option<ScalarExprType>, op: ScanType) -> Self {
+    pub fn new(schema: Table, predicate: Option<ScalarExprType>, scan_type: ScanType) -> Self {
         Self {
             schema,
             predicate,
-            op,
+            scan_type,
         }
     }
 }
@@ -77,14 +77,14 @@ impl InsertExpr {
 #[derive(Debug, Clone)]
 pub struct UpdateExpr {
     pub table_name: String,
-    pub columns: HashMap<String, Expr>,
+    pub columns: BTreeMap<String, Expr>,
     pub predicate: Option<ScalarExprType>,
 }
 
 impl UpdateExpr {
     pub fn new(
         table_name: String,
-        columns: HashMap<String, Expr>,
+        columns: BTreeMap<String, Expr>,
         predicate: Option<ScalarExprType>,
     ) -> Self {
         Self {
@@ -140,7 +140,7 @@ pub enum ScalarExprType {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PhysicalPlanExpr<'a> {
     Relational(RelationalExprType<'a>),
     Scalar(ScalarExprType),
