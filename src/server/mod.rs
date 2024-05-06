@@ -17,6 +17,7 @@ use crate::{
         NaadanError, StorageEngine,
     },
     transaction::TransactionManager,
+    utils,
 };
 
 #[derive(Debug)]
@@ -160,16 +161,16 @@ async fn get_query_from_request<'a>(
     loop {
         let bytes = socket.read_buf(buffer).await.unwrap();
         if 0 == bytes {
-            println!("Read zero bytes from server");
+            utils::log("Server".to_string(), format!("Read zero bytes from server"));
             return Err(NaadanError::Unknown);
         }
 
         count += bytes;
 
-        //println!("Bytes: {:?}", buffer);
+        //utils::log(format!("Bytes: {:?}", buffer));
         if buffer.as_slice()[(count - 4)..count] == b"EOF\n".to_vec() {
             if buffer.len() <= 5 {
-                println!("Empty query received");
+                utils::log("Server".to_string(), format!("Empty query received"));
                 return Err(NaadanError::Unknown);
             }
             break;

@@ -7,9 +7,13 @@ use std::{
 use tokio::task;
 
 use crate::{
-    query::{plan::RelationalExprType, RecordSet},
-    storage::{catalog, CatalogEngine, StorageEngine},
+    query::{
+        plan::{RelationalExprType, ScalarExprType},
+        RecordSet,
+    },
+    storage::{catalog, CatalogEngine, ScanType, StorageEngine},
     transaction::MvccTransaction,
+    utils,
 };
 
 use super::plan::PhysicalPlanExpr;
@@ -55,13 +59,25 @@ impl<E: StorageEngine> ExecContext<E> {
     }
 
     pub fn insert_table(&mut self, physical_plan: PhysicalPlanExpr) {
-        println!("Insert into table");
+        utils::log(
+            format!(
+                "QueryEngine::Executor - TID: {:?}",
+                self.transaction.as_ref().unwrap().id()
+            ),
+            format!("Insert into table"),
+        );
         let mut error = false;
 
         if let PhysicalPlanExpr::Relational(RelationalExprType::InsertExpr(expr)) = physical_plan {
             {
-                let mut transaction = task::block_in_place(|| {
-                    println!("Locking storage_instance {:?}", SystemTime::now());
+                let transaction = task::block_in_place(|| {
+                    utils::log(
+                        format!(
+                            "QueryEngine::Executor - TID: {:?}",
+                            self.transaction.as_ref().unwrap().id()
+                        ),
+                        format!("Locking storage_instance {:?}", SystemTime::now()),
+                    );
                     self.get_transaction().unwrap()
                     // do some compute-heavy work or call synchronous code
                 });
@@ -69,13 +85,22 @@ impl<E: StorageEngine> ExecContext<E> {
                 match transaction.get_table_details(&expr.table_name) {
                     Ok(val) => {
                         // TODO check row constraints, and procceed only if there are no conflict.
-                        println!("Inserting into Table '{}'", &expr.table_name);
+                        utils::log(
+                            format!("QueryEngine::Executor - TID: {:?}", transaction.id()),
+                            format!("Inserting into Table '{}'", &expr.table_name),
+                        );
                         transaction.write_table_rows(expr.rows, &val).unwrap();
                         error = false;
                     }
                     Err(_) => {
                         error = true;
-                        println!("Table '{}' not found", &expr.table_name);
+                        utils::log(
+                            format!(
+                                "QueryEngine::Executor - TID: {:?}",
+                                self.transaction.as_ref().unwrap().id()
+                            ),
+                            format!("Table '{}' not found", &expr.table_name),
+                        );
                     }
                 }
             }
@@ -85,7 +110,13 @@ impl<E: StorageEngine> ExecContext<E> {
     }
 
     pub fn create_table(&mut self, physical_plan: PhysicalPlanExpr) {
-        println!("creating table");
+        utils::log(
+            format!(
+                "QueryEngine::Executor - TID: {:?}",
+                self.transaction.as_ref().unwrap().id()
+            ),
+            format!("creating table"),
+        );
 
         let mut error = false;
 
@@ -100,14 +131,26 @@ impl<E: StorageEngine> ExecContext<E> {
             };
             {
                 let transaction = task::block_in_place(|| {
-                    println!("Locking storage_instance {:?}", SystemTime::now());
+                    utils::log(
+                        format!(
+                            "QueryEngine::Executor - TID: {:?}",
+                            self.transaction.as_ref().unwrap().id()
+                        ),
+                        format!("Locking storage_instance {:?}", SystemTime::now()),
+                    );
                     self.get_transaction().unwrap()
                     // do some compute-heavy work or call synchronous code
                 });
 
                 match transaction.get_table_details(&table.name) {
                     Ok(_) => {
-                        println!("Table '{}' already exists", &table.name);
+                        utils::log(
+                            format!(
+                                "QueryEngine::Executor - TID: {:?}",
+                                self.transaction.as_ref().unwrap().id()
+                            ),
+                            format!("Table '{}' already exists", &table.name),
+                        );
                         error = true;
                     }
                     Err(_) => {
@@ -121,13 +164,19 @@ impl<E: StorageEngine> ExecContext<E> {
     }
 
     pub fn update_table(&mut self, physical_plan: PhysicalPlanExpr) {
-        println!("Update table");
+        utils::log("QueryEngine::Executor".to_string(), format!("Update table"));
         let mut error = false;
 
         if let PhysicalPlanExpr::Relational(RelationalExprType::UpdateExpr(expr)) = physical_plan {
             {
                 let transaction = task::block_in_place(|| {
-                    println!("Locking storage_instance {:?}", SystemTime::now());
+                    utils::log(
+                        format!(
+                            "QueryEngine::Executor - TID: {:?}",
+                            self.transaction.as_ref().unwrap().id()
+                        ),
+                        format!("Locking storage_instance {:?}", SystemTime::now()),
+                    );
                     self.get_transaction().unwrap()
                     // do some compute-heavy work or call synchronous code
                 });
@@ -135,15 +184,34 @@ impl<E: StorageEngine> ExecContext<E> {
                 match transaction.get_table_details(&expr.table_name) {
                     Ok(schema) => {
                         // TODO check row constraints, and procceed only if there are no conflict.
-                        println!("Inserting into Table '{}'", &expr.table_name);
+                        utils::log(
+                            format!("QueryEngine::Executor - TID: {:?}", transaction.id()),
+                            format!("Inserting into Table '{}'", &expr.table_name),
+                        );
+
+                        let update_predicate: ScalarExprType;
+                        let update_scan_type = match expr.predicate {
+                            Some(predicate) => {
+                                update_predicate = predicate;
+                                ScanType::Filter(update_predicate)
+                            }
+                            None => ScanType::Full,
+                        };
+
                         transaction
-                            .update_table_rows(None, &expr.columns, &schema)
+                            .update_table_rows(&update_scan_type, &expr.columns, &schema)
                             .unwrap();
                         error = false;
                     }
                     Err(_) => {
                         error = true;
-                        println!("Table '{}' not found", &expr.table_name);
+                        utils::log(
+                            format!(
+                                "QueryEngine::Executor - TID: {:?}",
+                                self.transaction.as_ref().unwrap().id()
+                            ),
+                            format!("Table '{}' not found", &expr.table_name),
+                        );
                     }
                 }
             }
@@ -153,7 +221,13 @@ impl<E: StorageEngine> ExecContext<E> {
     }
 
     pub fn scan_table(&mut self, physical_plan: PhysicalPlanExpr) {
-        println!("Scanning table");
+        utils::log(
+            format!(
+                "QueryEngine::Executor - TID: {:?}",
+                self.transaction.as_ref().unwrap().id()
+            ),
+            format!("Scanning table"),
+        );
 
         let mut error = false;
         let mut result: RecordSet = RecordSet::new(vec![]);
@@ -161,29 +235,30 @@ impl<E: StorageEngine> ExecContext<E> {
         if let PhysicalPlanExpr::Relational(RelationalExprType::ScanExpr(expr)) = physical_plan {
             {
                 let transaction = task::block_in_place(|| {
-                    println!("Locking storage_instance {:?}", SystemTime::now());
+                    utils::log(
+                        format!(
+                            "QueryEngine::Executor - TID: {:?}",
+                            self.transaction.as_ref().unwrap().id()
+                        ),
+                        format!("Locking storage_instance {:?}", SystemTime::now()),
+                    );
                     self.get_transaction().unwrap()
                     // do some compute-heavy work or call synchronous code
                 });
 
                 // TODO: do proper error check
-                match expr.op {
+                match expr.scan_type {
                     crate::query::plan::ScanType::WildCardScan => task::block_in_place(|| {
-                        for row in transaction.scan_table(None, &expr.schema) {
+                        for row in
+                            transaction.scan_table(&crate::storage::ScanType::Full, &expr.schema)
+                        {
                             match row {
                                 Ok(row) => result.add_record(row),
                                 Err(error) => {}
                             }
                         }
                     }),
-                    crate::query::plan::ScanType::Explicit(_) => {
-                        for row in transaction.read_table_rows(&[1, 2], &expr.schema) {
-                            match row {
-                                Ok(row) => result.add_record(row),
-                                Err(error) => {}
-                            }
-                        }
-                    }
+                    crate::query::plan::ScanType::Explicit(_) => todo!(),
                 }
             }
             self.set_last_result(Some(result));

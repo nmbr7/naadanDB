@@ -3,10 +3,10 @@ use std::sync::Arc;
 use libnaadandb::{
     query::{query_engine::NaadanQueryEngine, NaadanQuery},
     server::SessionContext,
-    storage::{storage_engine::NaadanStorageEngine, StorageEngine},
+    storage::storage_engine::NaadanStorageEngine,
     transaction::TransactionManager,
 };
-use tokio::{process::Command, sync::Mutex};
+use tokio::process::Command;
 
 type ArcStorageEngine = Arc<Box<NaadanStorageEngine>>;
 
@@ -49,7 +49,7 @@ async fn process_query(
     transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
 ) {
     // Parse the provided SQL query.
-    let sql_query = NaadanQuery::init(query).unwrap();
+    let sql_query = NaadanQuery::init(query.clone()).unwrap();
     // Init a new query engine instance with reference to the global shared storage engine.
     let query_engine = NaadanQueryEngine::init(transaction_manager).await;
 
@@ -60,15 +60,16 @@ async fn process_query(
         .process_query(&mut session_context, sql_query)
         .await;
 
-    println!("********************************************");
-
     for query_result in query_results {
         match query_result {
-            Ok(val) => println!("{}", val.to_string()),
-            Err(err) => println!("Query execution failed: {}", err),
+            Ok(val) => println!(
+                "Query: [{}] execution succeeded with result: {}",
+                query,
+                val.to_string()
+            ),
+            Err(err) => println!("****** Query: [{}] execution failed: {} ******", query, err),
         }
     }
-    println!("********************************************");
 }
 
 /// Load the base setup data in the DB
@@ -116,10 +117,99 @@ async fn test_none_predicate_update() {
         "Select * from test1",
         "Select * from test1",
         "update test1 set id = 4",
+        "update test1 set id = 5",
+        "update test1 set id = 6",
         "Select * from test1",
     ];
 
     reset_storage_and_process_queries(queries.as_slice()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parallel_test_none_predicate_update() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
+
+    load_db_data(transaction_manager.clone()).await;
+
+    let transaction1 = transaction_manager.clone();
+
+    let t1 = tokio::spawn(async move {
+        let queries = [
+            "update test1 set name = 'Tomy'",
+            "Select * from test1",
+            "Select * from test1",
+            "update test1 set id = 4",
+            "update test1 set id = 5",
+            "update test1 set id = 6",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction1).await;
+    });
+
+    let transaction2 = transaction_manager.clone();
+    let t2 = tokio::spawn(async move {
+        let queries = [
+            "update test1 set name = 'Tomy3'",
+            "Select * from test1",
+            "update test1 set id = 7",
+            "update test1 set id = 8",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction2).await;
+    });
+
+    let transaction3 = transaction_manager.clone();
+    let t3 = tokio::spawn(async move {
+        let queries = [
+            "update test1 set name = 'Tim'",
+            "Select * from test1",
+            "update test1 set id = 12",
+            "update test1 set id = 13",
+            "update test1 set id = 23",
+            "update test1 set id = 25",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction3).await;
+    });
+
+    let transaction4 = transaction_manager.clone();
+    let t4 = tokio::spawn(async move {
+        let queries = [
+            "update test1 set name = 'david'",
+            "Select * from test1",
+            "update test1 set id = 15",
+            "update test1 set id = 16",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction4).await;
+    });
+
+    let t5 = tokio::spawn(async move {
+        let queries = [
+            "update test1 set name = 'Jeff'",
+            "Select * from test1",
+            "update test1 set id = 9",
+            "update test1 set id = 10",
+            "Select * from test1",
+            "update test1 set name = 'Joe'",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction_manager).await;
+    });
+
+    let _ = t1.await;
+    let _ = t2.await;
+    let _ = t3.await;
+    let _ = t4.await;
+    let _ = t5.await;
 }
 
 // TODO: Update Test with predicate

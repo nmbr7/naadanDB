@@ -1,19 +1,22 @@
 use sqlparser::ast::Expr;
 use std::{
-    collections::HashMap,
-    sync::{Arc, OnceLock},
+    collections::{BTreeMap, HashMap},
+    vec,
 };
 use tokio::{
-    sync::{Mutex, RwLock, RwLockReadGuard},
+    sync::{RwLock, RwLockReadGuard},
     task,
 };
 
 use super::{
     page::{CatalogPage, Page, PageId},
-    CatalogEngine, NaadanError, RowIdType, StorageEngine, TableIdType,
+    CatalogEngine, NaadanError, RowIdType, ScanType, StorageEngine, TableIdType,
 };
-use crate::query::{NaadanRecord, RecordSet};
 use crate::storage::catalog::*;
+use crate::{
+    query::{plan::ScalarExprType, NaadanRecord, RecordSet},
+    utils,
+};
 
 /// Storage Engine
 #[derive(Debug)]
@@ -56,9 +59,9 @@ impl StorageEngine for NaadanStorageEngine {
         task::block_in_place(|| {
             let mut table_pages: Vec<PageId> = vec![];
             let mut page_id: PageId;
-            let mut row_id: u32;
+            let mut row_id: u64;
 
-            // println!("Storage engine: {:?}", self);
+            // utils::log("BufferPool".to_string(),format!("Storage engine: {:?}", self));
 
             let mut table_index = self.table_index.blocking_write();
             let mut row_index = self.row_index.blocking_write();
@@ -70,7 +73,7 @@ impl StorageEngine for NaadanStorageEngine {
                     page_id = table_pages.last().unwrap().clone();
                     // TODO: make these updated atomic
                     row_id = val.row_count + 1;
-                    val.row_count += row_values.count() as u32;
+                    val.row_count += row_values.count() as u64;
 
                     let p = buffer_pool.page_pool.get_mut(&page_id).unwrap();
                     // TODO: check if the page has enough space
@@ -87,7 +90,7 @@ impl StorageEngine for NaadanStorageEngine {
                         table.id as usize,
                         TableMetadata {
                             page_ids: vec![page_id],
-                            row_count: row_values.count() as u32,
+                            row_count: row_values.count() as u64,
                         },
                     );
 
@@ -97,43 +100,37 @@ impl StorageEngine for NaadanStorageEngine {
                 }
             };
 
-            let row_end: u32 = page.write_table_row(row_id, row_values, table).unwrap() as u32;
+            let row_end: u64 = page.write_table_row(row_id, row_values, table).unwrap() as u64;
             page.write_to_disk(page_id).unwrap();
 
             for r_id in row_id..row_end {
                 row_index.insert(r_id as u64, page_id);
             }
 
-            println!("{:?}", self.row_index);
-
-            Ok(row_id as usize)
+            Ok(row_id)
         })
-    }
-
-    /// This will block on read lock for storage layer structures
-    fn read_table_rows<'a>(&'a self, row_ids: &'a [u64], schema: &'a Table) -> ScanIterator {
-        let row_index_guard = self.row_index.blocking_read();
-        let buffer_pool_guard = self.buffer_pool.blocking_read();
-
-        let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
-        ScanIterator::new(ScanType::ExplicitRowScan(row_ids), schema, guard)
     }
 
     fn delete_table_rows(&self, row_ids: &[u64], schema: &Table) -> Result<RecordSet, NaadanError> {
         todo!()
     }
 
-    fn update_table_rows(
+    fn update_table_rows<'a>(
         &self,
-        row_ids: Option<Vec<u64>>,
-        updated_columns: &HashMap<String, Expr>,
+        scan_types: &'a ScanType,
+        updated_columns: &BTreeMap<String, Expr>,
         schema: &Table,
-    ) -> Result<&[RowIdType], NaadanError> {
+    ) -> Result<Vec<RowIdType>, NaadanError> {
         task::block_in_place(|| {
+            let mut row_ids: Vec<RowIdType> = vec![];
             let table_index = self.table_index.blocking_read();
-            let row_id_list = match row_ids {
-                Some(val) => val,
-                None => {
+            let row_id_list: Vec<u64> = match scan_types {
+                ScanType::Filter(predicate) => {
+                    // TODO: Read the row_ids for row with predicate
+                    vec![1]
+                }
+                ScanType::RowIds(row_ids) => row_ids.to_vec(),
+                ScanType::Full => {
                     let table_metadata = table_index.get(&(schema.id as usize)).unwrap();
                     Vec::from_iter(1..table_metadata.row_count as u64 + 1)
                 }
@@ -142,9 +139,12 @@ impl StorageEngine for NaadanStorageEngine {
             let row_index = self.row_index.blocking_read();
             let mut buffer_pool = self.buffer_pool.blocking_write();
 
-            for r_id in &row_id_list {
-                let page_id = match row_index.get(r_id) {
-                    Some(pageid) => pageid,
+            for r_id in row_id_list {
+                let page_id = match row_index.get(&r_id) {
+                    Some(pageid) => {
+                        row_ids.push(r_id);
+                        pageid
+                    }
                     None => continue,
                 };
 
@@ -155,35 +155,47 @@ impl StorageEngine for NaadanStorageEngine {
                     .unwrap();
             }
 
-            Ok([0 as usize].as_slice())
+            Ok(row_ids)
         })
     }
 
     /// This will block on read lock for storage layer structures
-    fn scan_table<'a>(
-        &'a self,
-        predicate: Option<crate::query::plan::ScalarExprType>,
-        schema: &'a Table,
-    ) -> ScanIterator {
-        let mut row_collection: RecordSet = RecordSet::new(vec![]);
+    fn scan_table<'a>(&'a self, scan_types: &'a ScanType, schema: &'a Table) -> ScanIterator {
         let row_index_guard = self.row_index.blocking_read();
         let buffer_pool_guard = self.buffer_pool.blocking_read();
 
         let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
-        let row_count = self
-            .table_index
-            .blocking_read()
-            .get(&(schema.id as usize))
-            .unwrap()
-            .row_count as u64;
 
-        ScanIterator::new(ScanType::FullScan(row_count), schema, guard)
+        match scan_types {
+            ScanType::Filter(predicate) => {
+                let row_count = self
+                    .table_index
+                    .blocking_read()
+                    .get(&(schema.id as usize))
+                    .unwrap()
+                    .row_count as u64;
+                return ScanIterator::new(RowScanType::Filter(predicate, row_count), schema, guard);
+            }
+            ScanType::RowIds(row_ids) => {
+                return ScanIterator::new(RowScanType::ExplicitRowScan(row_ids), schema, guard);
+            }
+            ScanType::Full => {
+                let row_count = self
+                    .table_index
+                    .blocking_read()
+                    .get(&(schema.id as usize))
+                    .unwrap()
+                    .row_count as u64;
+                return ScanIterator::new(RowScanType::FullScan(row_count), schema, guard);
+            }
+        }
     }
 }
 
-enum ScanType<'a> {
+enum RowScanType<'a> {
     FullScan(u64),
     ExplicitRowScan(&'a [u64]),
+    Filter(&'a crate::query::plan::ScalarExprType, u64),
 }
 struct ScanGuard<'a> {
     row_index_guard: Option<RwLockReadGuard<'a, HashMap<u64, PageId>>>,
@@ -204,14 +216,14 @@ impl<'a> ScanGuard<'a> {
 }
 
 pub struct ScanIterator<'a> {
-    scan_type: ScanType<'a>,
+    scan_type: RowScanType<'a>,
     current_index: usize,
     guard: ScanGuard<'a>,
     schema: &'a Table,
 }
 
 impl<'a> ScanIterator<'a> {
-    fn new(scan_type: ScanType<'a>, schema: &'a Table, guard: ScanGuard<'a>) -> Self {
+    fn new(scan_type: RowScanType<'a>, schema: &'a Table, guard: ScanGuard<'a>) -> Self {
         Self {
             scan_type,
             current_index: 0,
@@ -226,35 +238,52 @@ impl<'a> Iterator for ScanIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let row_id_vec: Vec<u64>;
+
+        let mut scan_predicate: Option<&ScalarExprType> = None;
+
         let row_ids = match self.scan_type {
-            ScanType::FullScan(row_count) => {
+            RowScanType::FullScan(row_count) => {
                 row_id_vec = (1..row_count + 1).collect::<Vec<u64>>();
                 row_id_vec.as_slice()
             }
-            ScanType::ExplicitRowScan(row_ids) => row_ids,
+            RowScanType::ExplicitRowScan(row_ids) => row_ids,
+            RowScanType::Filter(predicate, row_count) => {
+                scan_predicate = Some(predicate);
+                row_id_vec = (1..row_count + 1).collect::<Vec<u64>>();
+                row_id_vec.as_slice()
+            }
         };
 
-        let row_id = match row_ids.get(self.current_index) {
-            Some(row_id) => row_id,
-            None => return None,
-        };
+        loop {
+            let row_id = match row_ids.get(self.current_index) {
+                Some(row_id) => row_id,
+                None => return None,
+            };
 
-        let page_id = match self.guard.row_index_guard.as_ref().unwrap().get(row_id) {
-            Some(pageid) => pageid,
-            None => return Some(Err(NaadanError::RowNotFound)),
-        };
+            let page_id = match self.guard.row_index_guard.as_ref().unwrap().get(row_id) {
+                Some(pageid) => pageid,
+                None => return Some(Err(NaadanError::RowNotFound)),
+            };
 
-        let page = self
-            .guard
-            .buffer_pool_guard
-            .as_ref()
-            .unwrap()
-            .get(&page_id)
-            .unwrap();
-        let row = page.read_table_row(row_id, self.schema).unwrap();
-        self.current_index += 1;
+            let page = self
+                .guard
+                .buffer_pool_guard
+                .as_ref()
+                .unwrap()
+                .get(&page_id)
+                .unwrap();
 
-        Some(Ok(row))
+            let row = page.read_table_row(row_id, self.schema).unwrap();
+
+            self.current_index += 1;
+
+            if let Some(_predicate) = scan_predicate {
+                // TODO check predicate againt the row
+                // if predicate fails, get net row,
+            }
+
+            return Some(Ok(row));
+        }
     }
 }
 
@@ -311,7 +340,7 @@ impl StorageEngineMetadata {
 #[derive(Debug)]
 pub struct TableMetadata {
     pub page_ids: Vec<PageId>,
-    pub row_count: u32,
+    pub row_count: u64,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Default)]
@@ -377,7 +406,10 @@ impl BufferPool {
     }
 
     pub fn get_any_available_page(&mut self, size: &usize) -> Option<FreePage> {
-        println!("Get: {:#?}", self.buffer_metadata.free_pages);
+        utils::log(
+            "BufferPool".to_string(),
+            format!("Get: {:#?}", self.buffer_metadata.free_pages),
+        );
         self.buffer_metadata.free_pages.sort();
         match self.buffer_metadata.free_pages.last() {
             Some(fp) if fp.1 > (size + 8 * 8) => Some(fp.clone()),
@@ -396,12 +428,21 @@ impl BufferPool {
     }
 
     pub fn update_available_page_size(&mut self, page_id: PageId, size: usize) -> bool {
-        println!("Getin Update: {:#?}", self.buffer_metadata.free_pages);
+        utils::log(
+            "BufferPool".to_string(),
+            format!("Getin Update: {:#?}", self.buffer_metadata.free_pages),
+        );
         let np = self.buffer_metadata.free_pages.pop().unwrap();
         if np.0 == page_id {
-            println!("Updating page {:?} with current {:#?} ", np.0, np.1);
+            utils::log(
+                "BufferPool".to_string(),
+                format!("Updating page {:?} with current {:#?} ", np.0, np.1),
+            );
             self.buffer_metadata.free_pages.push(FreePage(np.0, size));
-            println!("Updated value: {:#?}", self.buffer_metadata.free_pages);
+            utils::log(
+                "BufferPool".to_string(),
+                format!("Updated value: {:#?}", self.buffer_metadata.free_pages),
+            );
         }
 
         true
