@@ -33,11 +33,11 @@ pub struct NaadanServer<E: StorageEngine + 'static> {
 
 #[derive(Debug)]
 pub struct SessionContext {
-    pub current_transaction_id: u64,
-    pub transaction_type: TransactionType,
+    transaction_id: u64,
+    transaction_type: TransactionType,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TransactionType {
     Implicit,
     Explicit,
@@ -47,12 +47,24 @@ impl SessionContext {
     pub fn new() -> Self {
         Self {
             transaction_type: TransactionType::Implicit,
-            current_transaction_id: 0,
+            transaction_id: 0,
         }
     }
 
-    pub fn set_current_transaction_id(&mut self, current_transaction_id: u64) {
-        self.current_transaction_id = current_transaction_id;
+    pub fn set_transaction_id(&mut self, transaction_id: u64) {
+        self.transaction_id = transaction_id;
+    }
+
+    pub fn set_transaction_type(&mut self, transaction_type: TransactionType) {
+        self.transaction_type = transaction_type;
+    }
+
+    pub fn transaction_type(&self) -> &TransactionType {
+        &self.transaction_type
+    }
+
+    pub fn transaction_id(&self) -> u64 {
+        self.transaction_id
     }
 }
 
