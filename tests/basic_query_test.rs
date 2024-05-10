@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt::format, sync::Arc};
 
 use libnaadandb::{
     query::{query_engine::NaadanQueryEngine, NaadanQuery},
@@ -39,12 +39,19 @@ async fn process_queries(
     queries: &[&str],
     transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
 ) {
+    let mut session_context = SessionContext::new();
     for query in queries {
-        process_query(query.to_string(), transaction_manager.clone()).await;
+        process_query(
+            &mut session_context,
+            query.to_string(),
+            transaction_manager.clone(),
+        )
+        .await;
     }
 }
 
 async fn process_query(
+    session_context: &mut SessionContext,
     query: String,
     transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
 ) {
@@ -53,12 +60,8 @@ async fn process_query(
     // Init a new query engine instance with reference to the global shared storage engine.
     let query_engine = NaadanQueryEngine::init(transaction_manager).await;
 
-    let mut session_context = SessionContext::new();
-
     // Process the sql query Logical_Plan -> Physical_Plan -> Execute.
-    let query_results = query_engine
-        .process_query(&mut session_context, sql_query)
-        .await;
+    let query_results = query_engine.process_query(session_context, sql_query).await;
 
     for query_result in query_results {
         match query_result {
@@ -74,14 +77,17 @@ async fn process_query(
 
 /// Load the base setup data in the DB
 async fn load_db_data(transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>) {
-    let queries = [
-        "Create table test1 (id int, name varchar(255))",
-        "Insert into test1 values(1,'rom'),(2,'rob')",
+    let mut queries: Vec<String> = vec![
+        "Create table test1 (id int, name varchar(255))".to_string(),
     ];
 
-    for query in queries {
-        process_query(query.to_string(), transaction_manager.clone()).await;
+    for no in 1..200 {
+        queries.push(format!("Insert into test1 values({},'ro')", no));
     }
+
+    let str_array: Vec<&str> = queries.iter().map(|s| s.as_str()).collect();
+
+    process_queries(str_array.as_slice(), transaction_manager.clone()).await;
 }
 
 // ******************** Test Cases ******************** //
@@ -94,7 +100,7 @@ async fn test_basic_create_insert_select() {
         create_storage_instance(),
     )));
 
-    let queries = [
+    let queries = vec![
         "Create table test1 (id int, name varchar(255))",
         "Insert into test1 values(1,'rom'),(2,'rob')",
         "Select * from test1",
@@ -112,7 +118,7 @@ async fn test_none_predicate_update() {
 
     load_db_data(transaction_manager.clone()).await;
 
-    let queries = [
+    let queries = vec![
         "update test1 set name = 'Tomy'",
         "Select * from test1",
         "Select * from test1",
@@ -120,6 +126,28 @@ async fn test_none_predicate_update() {
         "update test1 set id = 5",
         "update test1 set id = 6",
         "Select * from test1",
+    ];
+
+    reset_storage_and_process_queries(queries.as_slice()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_transactional_update() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
+
+    load_db_data(transaction_manager.clone()).await;
+
+    let queries = [
+        //"update test1 set name = 'To'",
+        //"Select * from test1",
+        //"BEGIN",
+        //"update test1 set id = 4",
+        //"update test1 set id = 6",
+        //"COMMIT",
+        //"Select * from test1",
     ];
 
     reset_storage_and_process_queries(queries.as_slice()).await;
@@ -170,8 +198,10 @@ async fn parallel_test_none_predicate_update() {
             "Select * from test1",
             "update test1 set id = 12",
             "update test1 set id = 13",
-            "update test1 set id = 23",
-            "update test1 set id = 25",
+            "BEGIN",
+            "update test1 set id = 77",
+            "update test1 set id = 88",
+            "COMMIT",
             "Select * from test1",
         ];
 
@@ -200,6 +230,10 @@ async fn parallel_test_none_predicate_update() {
             "Select * from test1",
             "update test1 set name = 'Joe'",
             "Select * from test1",
+            "BEGIN",
+            "update test1 set id = 770",
+            "update test1 set id = 880",
+            "COMMIT",
         ];
 
         process_queries(queries.as_slice(), transaction_manager).await;

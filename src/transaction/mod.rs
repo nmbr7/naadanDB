@@ -8,7 +8,6 @@ use std::{
 };
 
 use env_logger::Target;
-use once_cell::sync::Lazy;
 use sqlparser::{ast::Expr, keywords::RLIKE};
 use tokio::{
     sync::{Mutex, RwLock, RwLockReadGuard},
