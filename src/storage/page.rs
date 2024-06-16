@@ -748,7 +748,11 @@ impl Page {
     pub fn write_to_disk(&self, page_id: PageId) -> Result<(), NaadanError> {
         utils::log(
             "Page".to_string(),
-            format!("Flushing Data: {:?} to disk.", self),
+            format!(
+                "Flushing page {} Data: {:?} to disk.",
+                page_id.get_page_index(),
+                self
+            ),
         );
         let table_data_file = String::from(DB_TABLE_DATA_FILE)
             .replace("{table_id}", page_id.get_table_id().to_string().as_str());

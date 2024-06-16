@@ -114,9 +114,9 @@ impl StorageEngine for NaadanStorageEngine {
 
             let mut rows_to_insert = row_values;
 
-            let mut fl = false;
+            let mut is_single_write;
             while !write_complete {
-                println!("Writing table Rows {:?}", rows_to_insert);
+                // println!("Writing table Rows {:?}", rows_to_insert);
                 let mut row_end: u64 = match page.write_table_row(row_id, &rows_to_insert, table) {
                     Ok(last_row) => {
                         write_complete = true;
@@ -125,25 +125,26 @@ impl StorageEngine for NaadanStorageEngine {
                     Err(NaadanError::PageCapacityFull(last_row)) => last_row,
                     _ => unreachable!(),
                 };
+
+                page.write_to_disk(page_id).unwrap();
+
                 if row_end <= row_id {
                     row_id = row_end;
                     row_end = row_end + 1;
-                    fl = true;
+                    is_single_write = true;
                 } else {
-                    fl = false
+                    is_single_write = false
                 }
 
-                println!("Page {:?}", page_id.get_page_index());
-                page.write_to_disk(page_id).unwrap();
-                utils::log(
-                    "Storage_engine".to_string(),
-                    format!(
-                        "Wrote {:?} rows, last inserted row id is {} and start is {}.",
-                        rows_to_insert.count(),
-                        row_end,
-                        row_id
-                    ),
-                );
+                // utils::log(
+                //     "Storage_engine".to_string(),
+                //     format!(
+                //         "Wrote {:?} rows, last inserted row id is {} and start is {}.",
+                //         rows_to_insert.count(),
+                //         row_end,
+                //         row_id
+                //     ),
+                // );
 
                 for r_id in row_id..row_end {
                     row_index.insert(r_id as u64, page_id);
@@ -176,7 +177,7 @@ impl StorageEngine for NaadanStorageEngine {
                     page = buffer_pool.page_pool.get_mut(&page_id).unwrap();
 
                     current_available_page += 1;
-                    if !fl {
+                    if !is_single_write {
                         let remaining_rows = rows_to_insert
                             .records()
                             .to_vec()
@@ -278,7 +279,7 @@ impl StorageEngine for NaadanStorageEngine {
             }
 
             if records.count() > 0 {
-                println!("update pending records: {:?}", records.records());
+                // println!("update pending records: {:?}", records.records());
                 self.write_table_rows(records, schema).unwrap();
             }
             // for res in self.scan_table(&ScanType::RowIds(vec![1, 2]), schema) {
