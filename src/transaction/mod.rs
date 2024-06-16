@@ -250,7 +250,7 @@ impl<E: StorageEngine> TransactionManager<E> {
             format!("Commiting  transaction with ID: [{:?}] Start timestamp: [{:?}] Commit timestamp: [{:?}]",
             transaction.id, transaction.start_timestamp,transaction.commit_timstamp));
 
-            // TODO: Validation and write to committed_transaction map shoul happen atomically
+            // TODO: Validation and write to committed_transaction map should happen atomically
             self.committed_transactions.blocking_write().insert(
                 transaction
                     .commit_timstamp
@@ -260,19 +260,29 @@ impl<E: StorageEngine> TransactionManager<E> {
 
             // Persist the change to the storage
             for (row_id, row_version) in current_transaction.change_map.blocking_read().iter() {
-                let row_version_data = &row_version.blocking_read();
-                let table_name = &row_version_data.table_name;
+                let mut updated_columns: BTreeMap<String, Expr> = BTreeMap::new();
 
-                let updates_columns = &row_version_data.change_data;
+                let row_version_node = row_version.blocking_read();
+                let table_name = row_version_node.table_name.clone();
+                Self::get_final_column_updates(
+                    transaction_id,
+                    commit_timestamp,
+                    &mut updated_columns,
+                    row_version_node,
+                );
                 let schema = self
                     .storage_engine()
                     .get_table_details(&table_name)
                     .unwrap();
 
+                utils::log(
+                    format!("Transaction - TID: {:?}", transaction_id),
+                    format!("Final Updated row {:?}", updated_columns),
+                );
                 self.storage_engine()
                     .update_table_rows(
                         &ScanType::RowIds(vec![row_id.clone() as u64]),
-                        updates_columns,
+                        &updated_columns,
                         &schema,
                     )
                     .unwrap();
@@ -280,6 +290,40 @@ impl<E: StorageEngine> TransactionManager<E> {
 
             Ok(())
         })
+    }
+
+    fn get_final_column_updates(
+        transaction_id: u64,
+        commit_timestamp: u64,
+        updated_columns: &mut BTreeMap<String, Expr>,
+        row_version_node: RwLockReadGuard<Box<RowVersionNode>>,
+    ) {
+        let row_change_data_id = row_version_node
+            .id
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        if row_change_data_id == transaction_id || row_change_data_id == commit_timestamp {
+            match &row_version_node.prev_version {
+                Some(node) => {
+                    let node_lock = node.blocking_read();
+                    Self::get_final_column_updates(
+                        transaction_id,
+                        commit_timestamp,
+                        updated_columns,
+                        node_lock,
+                    );
+                }
+                None => {}
+            }
+
+            for column in &row_version_node.change_data {
+                updated_columns.insert(column.0.clone(), column.1.clone());
+                utils::log(
+                    format!("Transaction - TID: {:?}", transaction_id),
+                    format!("Row change data {:?}", row_version_node.change_data),
+                );
+            }
+        }
     }
 
     fn start_background_maintanance_job(&self) {
@@ -431,6 +475,44 @@ impl<'a, E: StorageEngine> MvccScanIterator<'a, E> {
             row_iter,
         }
     }
+
+    fn reduce_record_value(
+        &mut self,
+        mut row_version_map_val: Arc<RwLock<Box<RowVersionNode>>>,
+        transaction_id: u64,
+        transaction_start_timestamp: u64,
+        row_value: &mut Result<NaadanRecord, NaadanError>,
+    ) {
+        loop {
+            let row_change_node = row_version_map_val.blocking_read();
+            let row_change_data_id = row_change_node
+                .id
+                .load(std::sync::atomic::Ordering::Acquire);
+
+            if row_change_data_id == transaction_id
+                || row_change_data_id < transaction_start_timestamp
+            {
+                utils::log(
+                    format!("Transaction - TID: {:?}", self.transaction.id),
+                    format!("Change committed at: {:?}", row_change_data_id),
+                );
+
+                let record = row_value.as_mut().unwrap();
+                for column in &row_change_node.change_data {
+                    record.update_column_value(column)
+                }
+                break;
+            } else {
+                let next_node = match &row_change_node.prev_version {
+                    Some(node) => node.clone(),
+                    None => break,
+                };
+
+                drop(row_change_node);
+                row_version_map_val = next_node;
+            }
+        }
+    }
 }
 
 impl<'a, E: StorageEngine> Iterator for MvccScanIterator<'a, E> {
@@ -440,6 +522,7 @@ impl<'a, E: StorageEngine> Iterator for MvccScanIterator<'a, E> {
         let row = self.row_iter.next();
         match row {
             Some(mut row_value) => {
+                println!("{:?}", row_value);
                 let row_id: u64 = row_value.as_ref().unwrap().row_id();
                 let transaction_start_timestamp = self
                     .transaction
@@ -456,41 +539,18 @@ impl<'a, E: StorageEngine> Iterator for MvccScanIterator<'a, E> {
                     .transaction_manager()
                     .row_version_node(row_id);
 
-                if let Some(mut row_version_map_val) = row_version_map_value {
+                if let Some(row_version_map_val) = row_version_map_value {
                     utils::log(
                         format!("Transaction - TID: {:?}", self.transaction.id),
                         format!("Before: {:?}", row_value),
                     );
 
-                    loop {
-                        let row_change_node = row_version_map_val.blocking_read();
-                        let row_change_data_id = row_change_node
-                            .id
-                            .load(std::sync::atomic::Ordering::Acquire);
-
-                        if row_change_data_id == transaction_id
-                            || row_change_data_id < transaction_start_timestamp
-                        {
-                            utils::log(
-                                format!("Transaction - TID: {:?}", self.transaction.id),
-                                format!("Change committed at: {:?}", row_change_data_id),
-                            );
-
-                            let record = row_value.as_mut().unwrap();
-                            for column in &row_change_node.change_data {
-                                record.update_column_value(column)
-                            }
-                            break;
-                        } else {
-                            let next_node = match &row_change_node.prev_version {
-                                Some(node) => node.clone(),
-                                None => break,
-                            };
-
-                            drop(row_change_node);
-                            row_version_map_val = next_node;
-                        }
-                    }
+                    self.reduce_record_value(
+                        row_version_map_val,
+                        transaction_id,
+                        transaction_start_timestamp,
+                        &mut row_value,
+                    );
 
                     utils::log(
                         format!("Transaction - TID: {:?}", self.transaction.id),

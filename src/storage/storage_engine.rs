@@ -9,7 +9,7 @@ use tokio::{
 };
 
 use super::{
-    page::{CatalogPage, Page, PageId},
+    page::{CatalogPage, Page, PageId, PageType},
     CatalogEngine, NaadanError, RowIdType, ScanType, StorageEngine, TableIdType,
 };
 use crate::storage::catalog::*;
@@ -67,23 +67,32 @@ impl StorageEngine for NaadanStorageEngine {
             let mut row_index = self.row_index.blocking_write();
             let mut buffer_pool = self.buffer_pool.blocking_write();
 
-            let page: &mut Page = match table_index.get_mut(&(table.id as usize)) {
+            let mut current_available_page;
+            let mut page: &mut Page = match table_index.get_mut(&(table.id as usize)) {
                 Some(val) => {
                     table_pages.append(&mut val.page_ids.clone());
+                    current_available_page = table_pages.len();
                     page_id = table_pages.last().unwrap().clone();
                     // TODO: make these updated atomic
-                    row_id = val.row_count + 1;
-                    val.row_count += row_values.count() as u64;
+                    row_id = val.row_count;
+                    if row_values.records().iter().all(|x| x.row_id() == 0) {
+                        row_id += 1;
+                        val.row_count += row_values.count() as u64;
+                    }
 
                     let p = buffer_pool.page_pool.get_mut(&page_id).unwrap();
-                    // TODO: check if the page has enough space
                     p
                 }
                 None => {
                     page_id = PageId::new(table.id, 1);
                     row_id = 1;
 
-                    let page = Page::new_with_capacity(8 * 1024);
+                    let page = if table.is_fixed_length() {
+                        Page::new_fixed_page_with_capacity(8 * 1024)
+                    } else {
+                        Page::new_dynamic_page_with_capacity(8 * 1024)
+                    };
+
                     buffer_pool.page_pool.insert(page_id, page);
 
                     table_index.insert(
@@ -96,15 +105,88 @@ impl StorageEngine for NaadanStorageEngine {
 
                     let page = buffer_pool.page_pool.get_mut(&page_id).unwrap();
 
+                    current_available_page = 1;
                     page
                 }
             };
 
-            let row_end: u64 = page.write_table_row(row_id, row_values, table).unwrap() as u64;
-            page.write_to_disk(page_id).unwrap();
+            let mut write_complete = false;
 
-            for r_id in row_id..row_end {
-                row_index.insert(r_id as u64, page_id);
+            let mut rows_to_insert = row_values;
+
+            let mut fl = false;
+            while !write_complete {
+                println!("Writing table Rows {:?}", rows_to_insert);
+                let mut row_end: u64 = match page.write_table_row(row_id, &rows_to_insert, table) {
+                    Ok(last_row) => {
+                        write_complete = true;
+                        last_row as u64
+                    }
+                    Err(NaadanError::PageCapacityFull(last_row)) => last_row,
+                    _ => unreachable!(),
+                };
+                if row_end <= row_id {
+                    row_id = row_end;
+                    row_end = row_end + 1;
+                    fl = true;
+                } else {
+                    fl = false
+                }
+
+                println!("Page {:?}", page_id.get_page_index());
+                page.write_to_disk(page_id).unwrap();
+                utils::log(
+                    "Storage_engine".to_string(),
+                    format!(
+                        "Wrote {:?} rows, last inserted row id is {} and start is {}.",
+                        rows_to_insert.count(),
+                        row_end,
+                        row_id
+                    ),
+                );
+
+                for r_id in row_id..row_end {
+                    row_index.insert(r_id as u64, page_id);
+                    utils::log(
+                        "Storage_engine".to_string(),
+                        format!(
+                            "Updating row_index with values row id {} and page id {}",
+                            r_id,
+                            page_id.get_page_index()
+                        ),
+                    );
+                }
+
+                if !write_complete {
+                    page_id = PageId::new(table.id, current_available_page as u32 + 1);
+
+                    {
+                        let l_page = if table.is_fixed_length() {
+                            Page::new_fixed_page_with_capacity(8 * 1024)
+                        } else {
+                            Page::new_dynamic_page_with_capacity(8 * 1024)
+                        };
+
+                        buffer_pool.page_pool.insert(page_id, l_page);
+                    }
+
+                    let t_metadata = table_index.get_mut(&(table.id as usize)).unwrap();
+
+                    t_metadata.page_ids.push(page_id);
+                    page = buffer_pool.page_pool.get_mut(&page_id).unwrap();
+
+                    current_available_page += 1;
+                    if !fl {
+                        let remaining_rows = rows_to_insert
+                            .records()
+                            .to_vec()
+                            .split_off((row_end - row_id) as usize);
+
+                        rows_to_insert = RecordSet::new(remaining_rows);
+
+                        row_id = row_end;
+                    }
+                }
             }
 
             Ok(row_id)
@@ -122,40 +204,90 @@ impl StorageEngine for NaadanStorageEngine {
         schema: &Table,
     ) -> Result<Vec<RowIdType>, NaadanError> {
         task::block_in_place(|| {
+            let mut records = RecordSet::new(vec![]);
             let mut row_ids: Vec<RowIdType> = vec![];
-            let table_index = self.table_index.blocking_read();
-            let row_id_list: Vec<u64> = match scan_types {
-                ScanType::Filter(predicate) => {
-                    // TODO: Read the row_ids for row with predicate
-                    vec![1]
-                }
-                ScanType::RowIds(row_ids) => row_ids.to_vec(),
-                ScanType::Full => {
-                    let table_metadata = table_index.get(&(schema.id as usize)).unwrap();
-                    Vec::from_iter(1..table_metadata.row_count as u64 + 1)
-                }
-            };
-
-            let row_index = self.row_index.blocking_read();
-            let mut buffer_pool = self.buffer_pool.blocking_write();
-
-            for r_id in row_id_list {
-                let page_id = match row_index.get(&r_id) {
-                    Some(pageid) => {
-                        row_ids.push(r_id);
-                        pageid
+            {
+                let table_index = self.table_index.blocking_read();
+                let row_id_list: Vec<u64> = match scan_types {
+                    ScanType::Filter(predicate) => {
+                        // TODO: Read the row_ids for row with predicate
+                        vec![1]
                     }
-                    None => continue,
+                    ScanType::RowIds(row_ids) => row_ids.to_vec(),
+                    ScanType::Full => {
+                        let table_metadata = table_index.get(&(schema.id as usize)).unwrap();
+                        Vec::from_iter(1..table_metadata.row_count as u64 + 1)
+                    }
                 };
 
-                let page = buffer_pool.get_mut(&page_id).unwrap();
+                let row_index = self.row_index.blocking_read();
+                let mut buffer_pool = self.buffer_pool.blocking_write();
 
-                // TODO: Write transaction row version chain for current rowid
-                page.update_table_row(r_id, &updated_columns, schema)
-                    .unwrap();
+                let contains_var_type = updated_columns.iter().any(|col| match col.1 {
+                    sqlparser::ast::Expr::Value(value) => match value {
+                        sqlparser::ast::Value::SingleQuotedString(_)
+                        | sqlparser::ast::Value::DoubleQuotedString(_) => return true,
+                        _ => return false,
+                    },
+                    _ => false,
+                });
+
+                for r_id in row_id_list {
+                    let page_id = match row_index.get(&r_id) {
+                        Some(pageid) => {
+                            row_ids.push(r_id);
+                            pageid
+                        }
+                        None => continue,
+                    };
+
+                    let page = buffer_pool.get_mut(&page_id).unwrap();
+
+                    match page.update_table_row(r_id, &updated_columns, schema, contains_var_type) {
+                        Err(NaadanError::PageCapacityFull(row_id)) => {
+                            utils::log(
+                                "Storage_engine".to_string(),
+                                format!("Page capacity full, moving row to another page",),
+                            );
+                            let mut record = page.read_table_row(&row_id, schema).unwrap();
+
+                            updated_columns
+                                .iter()
+                                .for_each(|col| record.update_column_value(col));
+
+                            // TODO: delete the current record from it's page and add it to free space in page
+                            // self.delete_table_rows(&[row_id], schema);
+
+                            records.add_record(record);
+                        }
+                        Ok(_) => {
+                            utils::log(
+                                "Storage_engine".to_string(),
+                                format!(
+                                    "Done updating row {} to page {}",
+                                    r_id,
+                                    page_id.get_page_index()
+                                ),
+                            );
+                        }
+                        _ => (),
+                    }
+
+                    page.write_to_disk(*page_id).unwrap();
+                }
             }
 
-            Ok(row_ids)
+            if records.count() > 0 {
+                println!("update pending records: {:?}", records.records());
+                self.write_table_rows(records, schema).unwrap();
+            }
+            // for res in self.scan_table(&ScanType::RowIds(vec![1, 2]), schema) {
+            //     utils::log(
+            //         "Storage_engine".to_string(),
+            //         format!("Row after update {:?}", res.unwrap()),
+            //     );
+            // }
+            return Ok(row_ids);
         })
     }
 
@@ -273,6 +405,10 @@ impl<'a> Iterator for ScanIterator<'a> {
                 .get(&page_id)
                 .unwrap();
 
+            utils::log(
+                "Storage_engine".to_string(),
+                format!("Row id {} in Page id: {}", row_id, page_id.get_page_index()),
+            );
             let row = page.read_table_row(row_id, self.schema).unwrap();
 
             self.current_index += 1;
