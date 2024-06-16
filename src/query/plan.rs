@@ -50,14 +50,20 @@ impl ScanExpr {
 #[derive(Debug, Clone)]
 pub struct CreateTableExpr {
     pub table_name: String,
-    pub table_schema: HashMap<String, Column>,
+    pub table_schema: BTreeMap<String, Column>,
+    pub table_schema_size: u64,
 }
 
 impl CreateTableExpr {
-    pub fn new(table_name: String, table_schema: HashMap<String, Column>) -> Self {
+    pub fn new(
+        table_name: String,
+        table_schema: BTreeMap<String, Column>,
+        table_schema_size: u64,
+    ) -> Self {
         Self {
             table_name,
             table_schema,
+            table_schema_size,
         }
     }
 }

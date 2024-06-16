@@ -9,16 +9,13 @@ use crate::query::kernel::ExecContext;
 use crate::query::plan::{IndexScanExpr, *};
 use crate::query::NaadanRecord;
 use crate::server::{SessionContext, TransactionType};
-use crate::storage::catalog::{Column, ColumnType, Offset, Table};
-use crate::storage::storage_engine::NaadanStorageEngine;
+use crate::storage::catalog::{Column, ColumnSize, ColumnType, Table};
+
 use crate::storage::{NaadanError, StorageEngine};
 use crate::transaction::TransactionManager;
-use crate::{rc_ref_cell, transaction, utils};
+use crate::{rc_ref_cell, utils};
 
-use log::{debug, error};
 use sqlparser::ast::{Expr, Insert, SetExpr, Statement, TableFactor, Values};
-
-use tokio::sync::Mutex;
 use tokio::task;
 
 use super::{NaadanQuery, RecordSet};
@@ -367,7 +364,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
 
         match statement {
             Statement::CreateTable { name, columns, .. } => {
-                let mut column_map: HashMap<String, Column> = HashMap::new();
+                let mut column_map: BTreeMap<String, Column> = BTreeMap::new();
                 let table_name = name.0.last().unwrap().value.clone();
                 {
                     let storage_instance = self.transaction_manager.storage_engine();
@@ -428,7 +425,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                         },
                     );
 
-                    offset += Offset::from(&col.data_type).get_value();
+                    offset += ColumnSize::from(&col.data_type).get_value();
                 }
 
                 // Create plan
@@ -436,6 +433,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                     rel_type: RelationalExprType::CreateTableExpr(CreateTableExpr {
                         table_name: table_name,
                         table_schema: column_map,
+                        table_schema_size: offset,
                     }),
                     group: None,
                     stats: None,

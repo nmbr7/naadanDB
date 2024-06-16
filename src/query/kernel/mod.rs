@@ -126,6 +126,7 @@ impl<E: StorageEngine> ExecContext<E> {
             let mut table = catalog::Table {
                 name: expr.table_name,
                 schema: expr.table_schema,
+                column_schema_size: expr.table_schema_size,
                 indexes: HashSet::new(),
                 id: 0,
             };

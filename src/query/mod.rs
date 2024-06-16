@@ -1,8 +1,8 @@
 use core::slice;
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 use self::parser::NaadanParser;
-use crate::storage::NaadanError;
+use crate::storage::{catalog::Column, NaadanError};
 use sqlparser::ast::{Expr, Statement};
 
 mod kernel;
@@ -15,7 +15,7 @@ pub mod query_engine;
 pub struct NaadanRecord {
     row_id: u64,
     columns: Vec<Expr>,
-    column_names: Option<Vec<String>>,
+    column_schema: Option<BTreeMap<String, Column>>,
 }
 
 impl NaadanRecord {
@@ -23,19 +23,19 @@ impl NaadanRecord {
         Self {
             row_id,
             columns,
-            column_names: None,
+            column_schema: None,
         }
     }
 
-    pub fn new_with_column_names(
+    pub fn new_with_column_schema(
         row_id: u64,
         columns: Vec<Expr>,
-        column_names: Vec<String>,
+        column_schema: BTreeMap<String, Column>,
     ) -> Self {
         Self {
             row_id,
             columns,
-            column_names: Some(column_names),
+            column_schema: Some(column_schema),
         }
     }
 
@@ -49,18 +49,22 @@ impl NaadanRecord {
 
     pub fn update_column_value(&mut self, column: (&String, &Expr)) {
         let column_index = self
-            .column_names
+            .column_schema
             .as_ref()
             .unwrap()
             .iter()
-            .position(|val| val == column.0)
+            .position(|val| val.0 == column.0)
             .unwrap();
 
         self.columns[column_index] = column.1.clone();
     }
 
-    pub fn set_column_names(&mut self, column_names: Option<Vec<String>>) {
-        self.column_names = column_names;
+    pub fn set_column_schema(&mut self, column_schema: Option<BTreeMap<String, Column>>) {
+        self.column_schema = column_schema;
+    }
+
+    pub fn column_schema(&self) -> Option<&BTreeMap<String, Column>> {
+        self.column_schema.as_ref()
     }
 }
 
@@ -84,6 +88,10 @@ impl RecordSet {
 
     pub fn count(&self) -> usize {
         self.count
+    }
+
+    pub fn records(&self) -> &[NaadanRecord] {
+        &self.records
     }
 }
 

@@ -1,27 +1,48 @@
 use std::io::{Cursor, Read, Write};
 
+use crate::utils::log;
+
 pub(crate) fn write_string_to_buf(
-    dyn_cursor_base: &mut u64,
+    dyn_cursor_base: &u64,
+    last_dyn_offset: &mut u64,
     buf_cursor: &mut Cursor<&mut Vec<u8>>,
     str_val: &String,
 ) {
-    let offset = dyn_cursor_base.to_be_bytes();
+    // TODO: If this is an update then check if the existing space is enough or we need to allocate new space
+    //       will have to add a free list metadata in header or, the a background task will have to occationaly
+    //       read the dynamic memory and rebalance the space.
+    let offset_index = last_dyn_offset.to_be_bytes();
 
-    buf_cursor.write_all(&offset).unwrap();
+    buf_cursor.write_all(&offset_index).unwrap();
     let current_pos = buf_cursor.position();
 
-    // Seek to table column list id offset start location at 1024 * 2 bytes
-    buf_cursor.set_position(*dyn_cursor_base as u64);
+    // Seek to dynamic content region last entry offset.
+    log(
+        "Utils".to_string(),
+        format!(
+            "Current pos {}, String write offset {} and string is {}",
+            buf_cursor.position(),
+            *last_dyn_offset,
+            str_val
+        ),
+    );
+    buf_cursor.set_position(*dyn_cursor_base + *last_dyn_offset);
+    log(
+        "Utils".to_string(),
+        format!("String write offset {}", *last_dyn_offset),
+    );
 
-    // write table name length (max is 128) in 2 byte
+    // write string length in 2 byte
     buf_cursor
         .write_all(&(str_val.len() as u16).to_be_bytes())
         .unwrap();
 
-    // Write table name (max len is 128)
+    // Write string content
     buf_cursor.write_all(str_val.as_bytes()).unwrap();
     buf_cursor.set_position(current_pos);
-    *dyn_cursor_base += str_val.len() as u64 + 2;
+
+    // Update the dynamic content region last entry offset
+    *last_dyn_offset += 2 + str_val.len() as u64;
 }
 
 /// Read string from a byte slice (Format: |StringLen|StringBytes|)
@@ -34,7 +55,22 @@ pub(crate) fn read_string_from_buf(
     let current_pos = buf_cursor.position();
     buf_cursor.set_position(offset);
 
-    buf_cursor.read_exact(&mut len_buf).unwrap();
+    log(
+        "Utils".to_string(),
+        format!(
+            "String read page offset is {}  - Fixed base is {}",
+            buf_cursor.position(),
+            current_pos
+        ),
+    );
+
+    match buf_cursor.read_exact(&mut len_buf) {
+        Ok(_) => {}
+        Err(err) => {
+            log("Utils".to_string(), format!("Error: {}", err));
+            panic!()
+        }
+    }
 
     let len = u16::from_be_bytes(len_buf);
 
@@ -42,11 +78,11 @@ pub(crate) fn read_string_from_buf(
 
     buf_cursor.read_exact(&mut data_buf).unwrap();
 
-    let table_name = String::from_utf8(data_buf).unwrap();
+    let string_value = String::from_utf8(data_buf).unwrap();
 
     if reset_offset {
         buf_cursor.set_position(current_pos);
     }
 
-    table_name
+    string_value
 }

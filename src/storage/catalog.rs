@@ -1,6 +1,6 @@
 use core::panic;
 use sqlparser::ast::DataType;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Default)]
 pub struct Database {
@@ -13,8 +13,17 @@ pub struct Database {
 pub struct Table {
     pub id: u16,
     pub name: String,
-    pub schema: HashMap<String, Column>,
+    pub schema: BTreeMap<String, Column>,
+    pub column_schema_size: u64,
     pub indexes: HashSet<u16>,
+}
+
+impl Table {
+    pub fn is_fixed_length(&self) -> bool {
+        !self.schema.iter().any(|(_, column)| {
+            column.column_type == ColumnType::String || column.column_type == ColumnType::Binary
+        })
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -49,32 +58,32 @@ pub enum ColumnType {
 impl From<&DataType> for ColumnType {
     fn from(item: &DataType) -> Self {
         match item {
-            DataType::Varchar(Some(val)) => Self::String,
+            DataType::Varchar(_) => Self::String,
             DataType::Bool => Self::Bool,
-            DataType::Int(val) => Self::Int,
-            DataType::Float(Some(val)) => Self::Float,
-            DataType::Datetime(Some(val)) => Self::DateTime,
-            DataType::Binary(Some(val)) => Self::Binary,
+            DataType::Int(_) => Self::Int,
+            DataType::Float(_) => Self::Float,
+            DataType::Datetime(_) => Self::DateTime,
+            DataType::Binary(_) => Self::Binary,
             _ => Self::UnSupported,
         }
     }
 }
 
-pub struct Offset(u64);
+pub struct ColumnSize(u64);
 
-impl Offset {
+impl ColumnSize {
     pub fn get_value(&self) -> u64 {
         self.0
     }
 }
 
-impl From<&DataType> for Offset {
+impl From<&DataType> for ColumnSize {
     fn from(item: &DataType) -> Self {
         match item {
-            DataType::Varchar(Some(val)) => Offset(8),
-            DataType::Bool => Offset(1),
-            DataType::Int(val) => Offset(4),
-            _ => Offset(0),
+            DataType::Varchar(_) => ColumnSize(8),
+            DataType::Bool => ColumnSize(1),
+            DataType::Int(_) => ColumnSize(4),
+            _ => ColumnSize(0),
         }
     }
 }

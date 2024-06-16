@@ -27,6 +27,8 @@ pub enum NaadanError {
 
     #[error("Adding new rows to table failed")]
     RowAddFailed,
+    #[error("Page capacity is full")]
+    PageCapacityFull(u64),
     #[error("Getting rows from table failed, Row not found")]
     RowNotFound,
     #[error("Flusing page to disk failed")]

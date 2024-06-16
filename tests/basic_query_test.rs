@@ -1,4 +1,4 @@
-use std::{fmt::format, sync::Arc};
+use std::sync::Arc;
 
 use libnaadandb::{
     query::{query_engine::NaadanQueryEngine, NaadanQuery},
@@ -30,7 +30,7 @@ async fn reset_storage_and_process_queries(queries: &[&str]) {
         create_storage_instance(),
     )));
 
-    load_db_data(transaction_manager.clone()).await;
+    load_db_data_batch(transaction_manager.clone()).await;
 
     process_queries(queries, transaction_manager).await;
 }
@@ -52,7 +52,7 @@ async fn process_queries(
 
 async fn process_query(
     session_context: &mut SessionContext,
-    query: String,
+    mut query: String,
     transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
 ) {
     // Parse the provided SQL query.
@@ -65,24 +65,77 @@ async fn process_query(
 
     for query_result in query_results {
         match query_result {
-            Ok(val) => println!(
-                "Query: [{}] execution succeeded with result: {}",
-                query,
-                val.to_string()
-            ),
+            Ok(val) => {
+                query.truncate(usize::pow(2, 8));
+                println!(
+                    "Query: [{}]..... execution succeeded with result: {}",
+                    query,
+                    val.to_string()
+                )
+            }
             Err(err) => println!("****** Query: [{}] execution failed: {} ******", query, err),
         }
     }
 }
 
 /// Load the base setup data in the DB
-async fn load_db_data(transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>) {
-    let mut queries: Vec<String> = vec![
-        "Create table test1 (id int, name varchar(255))".to_string(),
-    ];
+async fn load_db_data_batch(
+    transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
+) {
+    let mut queries: Vec<String> =
+        vec!["Create table test1 (id int, ii int, name varchar, b int)".to_string()];
+
+    let mut val: Vec<String> = vec![];
+    for no in 1..=10_000 {
+        val.push(format!(
+            "({},{},'{}Test',1234)",
+            no,
+            no + 1,
+            (no % 10).to_string()
+        ));
+    }
+
+    queries.push(format!(
+        "Insert into test1 (id, ii, name, b) values{}",
+        val.join(",")
+    ));
+    let str_array: Vec<&str> = queries.iter().map(|s| s.as_str()).collect();
+
+    process_queries(str_array.as_slice(), transaction_manager.clone()).await;
+}
+
+/// Load the base setup data in the DB
+async fn load_db_data_batch_with_size(
+    count: usize,
+    transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
+) {
+    let mut queries: Vec<String> =
+        vec!["Create table test1 (id int, score int, name varchar, rate int)".to_string()];
+
+    let mut val: Vec<String> = vec![];
+    for no in 1..=count {
+        val.push(format!(
+            "({},{},'{}',1234)",
+            no,
+            no + 1,
+            (no % 10).to_string()
+        ));
+    }
+
+    queries.push(format!(
+        "Insert into test1 (id,score,name,rate) values{}",
+        val.join(",")
+    ));
+    let str_array: Vec<&str> = queries.iter().map(|s| s.as_str()).collect();
+
+    process_queries(str_array.as_slice(), transaction_manager.clone()).await;
+}
+
+async fn load_db_data_seq(transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>) {
+    let mut queries: Vec<String> = vec!["Create table test1 (id int, name varchar)".to_string()];
 
     for no in 1..200 {
-        queries.push(format!("Insert into test1 values({},'ro')", no));
+        queries.push(format!("Insert into test1 (id,name) values({},'ro')", no));
     }
 
     let str_array: Vec<&str> = queries.iter().map(|s| s.as_str()).collect();
@@ -116,7 +169,7 @@ async fn test_none_predicate_update() {
         create_storage_instance(),
     )));
 
-    load_db_data(transaction_manager.clone()).await;
+    load_db_data_batch(transaction_manager.clone()).await;
 
     let queries = vec![
         "update test1 set name = 'Tomy'",
@@ -138,11 +191,20 @@ async fn test_transactional_update() {
         create_storage_instance(),
     )));
 
-    load_db_data(transaction_manager.clone()).await;
+    load_db_data_batch(transaction_manager.clone()).await;
+    load_db_data_batch(transaction_manager.clone()).await;
+    // load_db_data_batch(transaction_manager.clone()).await;
+    // load_db_data_batch(transaction_manager.clone()).await;
+    // load_db_data_batch(transaction_manager.clone()).await;
+    // load_db_data_batch(transaction_manager.clone()).await;
+    // load_db_data_batch(transaction_manager.clone()).await;
+    // load_db_data_batch(transaction_manager.clone()).await;
+    // load_db_data_batch(transaction_manager.clone()).await;
+    // load_db_data_batch(transaction_manager.clone()).await;
 
     let queries = [
-        //"update test1 set name = 'To'",
-        //"Select * from test1",
+        "update test1 set name = 'To'",
+        "Select * from test1",
         //"BEGIN",
         //"update test1 set id = 4",
         //"update test1 set id = 6",
@@ -150,7 +212,49 @@ async fn test_transactional_update() {
         //"Select * from test1",
     ];
 
-    reset_storage_and_process_queries(queries.as_slice()).await;
+    process_queries(queries.as_slice(), transaction_manager).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_update() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
+
+    load_db_data_batch_with_size(1024, transaction_manager.clone()).await;
+
+    let queries = [
+        //"Select * from test1",
+        //"update test1 set name = 'Ne'",
+        //"Select * from test1",
+        "BEGIN",
+        "update test1 set rate = 7777",
+        "update test1 set rate = 77696",
+        "update test1 set name = 'LatestDate'",
+        "update test1 set rate = 2147483647",
+        "Select * from test1",
+        "update test1 set name = 'La'",
+        "update test1 set id = 4",
+        "update test1 set name = 'Tomy'",
+        "COMMIT",
+        "Select * from test1",
+    ];
+
+    process_queries(queries.as_slice(), transaction_manager.clone()).await;
+
+    // load_db_data_batch_with_size(2048, transaction_manager.clone()).await;
+
+    // let queries = [
+    //     "BEGIN",
+    //     "update test1 set rate = 9898",
+    //     "update test1 set name = 'newestDate'",
+    //     "update test1 set rate = 333347",
+    //     "COMMIT",
+    //     "Select * from test1",
+    // ];
+
+    // process_queries(queries.as_slice(), transaction_manager.clone()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -160,90 +264,99 @@ async fn parallel_test_none_predicate_update() {
         create_storage_instance(),
     )));
 
-    load_db_data(transaction_manager.clone()).await;
+    load_db_data_batch_with_size(1024, transaction_manager.clone()).await;
 
     let transaction1 = transaction_manager.clone();
-
     let t1 = tokio::spawn(async move {
         let queries = [
-            "update test1 set name = 'Tomy'",
-            "Select * from test1",
-            "Select * from test1",
-            "update test1 set id = 4",
-            "update test1 set id = 5",
-            "update test1 set id = 6",
+            //"Select * from test1",
+            //"update test1 set name = 'Ne'",
+            //"Select * from test1",
+            "BEGIN",
+            "update test1 set rate = 7777",
+            "update test1 set rate = 77696",
+            "update test1 set name = 'LatestDate'",
+            "update test1 set rate = 2147483647",
+            // "Select * from test1",
+            // "update test1 set name = 'La'",
+            // "update test1 set id = 4",
+            // "update test1 set name = 'Tomy'",
+            "COMMIT",
             "Select * from test1",
         ];
 
-        process_queries(queries.as_slice(), transaction1).await;
+        process_queries(queries.as_slice(), transaction1.clone()).await;
     });
 
     let transaction2 = transaction_manager.clone();
     let t2 = tokio::spawn(async move {
         let queries = [
-            "update test1 set name = 'Tomy3'",
-            "Select * from test1",
-            "update test1 set id = 7",
-            "update test1 set id = 8",
-            "Select * from test1",
-        ];
-
-        process_queries(queries.as_slice(), transaction2).await;
-    });
-
-    let transaction3 = transaction_manager.clone();
-    let t3 = tokio::spawn(async move {
-        let queries = [
-            "update test1 set name = 'Tim'",
-            "Select * from test1",
-            "update test1 set id = 12",
-            "update test1 set id = 13",
+            //"Select * from test1",
+            //"update test1 set name = 'Ne'",
+            //"Select * from test1",
             "BEGIN",
-            "update test1 set id = 77",
-            "update test1 set id = 88",
-            "COMMIT",
-            "Select * from test1",
-        ];
-
-        process_queries(queries.as_slice(), transaction3).await;
-    });
-
-    let transaction4 = transaction_manager.clone();
-    let t4 = tokio::spawn(async move {
-        let queries = [
-            "update test1 set name = 'david'",
-            "Select * from test1",
-            "update test1 set id = 15",
-            "update test1 set id = 16",
-            "Select * from test1",
-        ];
-
-        process_queries(queries.as_slice(), transaction4).await;
-    });
-
-    let t5 = tokio::spawn(async move {
-        let queries = [
-            "update test1 set name = 'Jeff'",
-            "Select * from test1",
             "update test1 set id = 9",
-            "update test1 set id = 10",
-            "Select * from test1",
-            "update test1 set name = 'Joe'",
-            "Select * from test1",
-            "BEGIN",
-            "update test1 set id = 770",
-            "update test1 set id = 880",
+            "update test1 set name = 'JK'",
             "COMMIT",
+            "Select * from test1",
         ];
 
-        process_queries(queries.as_slice(), transaction_manager).await;
+        process_queries(queries.as_slice(), transaction2.clone()).await;
     });
+
+    // let transaction3 = transaction_manager.clone();
+    // let t3 = tokio::spawn(async move {
+    //     let queries = [
+    //         "update test1 set name = 'Tim'",
+    //         "Select * from test1",
+    //         "update test1 set id = 12",
+    //         "update test1 set id = 13",
+    //         "BEGIN",
+    //         "update test1 set id = 77",
+    //         "update test1 set id = 88",
+    //         "COMMIT",
+    //         "Select * from test1",
+    //     ];
+
+    //     process_queries(queries.as_slice(), transaction3).aritingait;
+    // });
+
+    // let transaction4 = transaction_manager.clone();
+    // let t4 = tokio::sparon(async move {
+    //     let queries = [
+    //         "update test1 set name = 'david'",
+    //         "Select * from test1",
+    //         "update test1 set id = 15",
+    //         "update test1 set id = 16",
+    //         "Select * from test1",
+    //     ];
+
+    //     process_queries(queries.as_slice(), transaction4)row 1ait;
+    // });
+
+    // let t5 = tokio::spawn(async move {
+    //     let quies = [
+    //         "update test1 set name = 'Jeff'",
+    //         "Select * from test1",
+    //         "update test1 set id = 9",
+    //         "update test1 set id = 10",
+    //         "Select * from test1",
+    //         "update test1 set name = 'Joe'",
+    //         "Select * from test1",
+    //         "BEGIN",
+    //         "update test1 set id = 770",
+    //         "update test1 set id = 880",
+    //         "COMMIT",
+    //     ];
+
+    //     process_queries(queries.as_slice(), transaction_manager).await;
+    // });
 
     let _ = t1.await;
     let _ = t2.await;
-    let _ = t3.await;
-    let _ = t4.await;
-    let _ = t5.await;
+    // let _ = t3.await;
+    // let _ = t4.await;
+    // let _ = t5.await;
 }
 
 // TODO: Update Test with predicate
