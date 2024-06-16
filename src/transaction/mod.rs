@@ -303,19 +303,6 @@ impl<E: StorageEngine> TransactionManager<E> {
             .load(std::sync::atomic::Ordering::Acquire);
 
         if row_change_data_id == transaction_id || row_change_data_id == commit_timestamp {
-            match &row_version_node.prev_version {
-                Some(node) => {
-                    let node_lock = node.blocking_read();
-                    Self::get_final_column_updates(
-                        transaction_id,
-                        commit_timestamp,
-                        updated_columns,
-                        node_lock,
-                    );
-                }
-                None => {}
-            }
-
             for column in &row_version_node.change_data {
                 updated_columns.insert(column.0.clone(), column.1.clone());
                 utils::log(
@@ -323,6 +310,19 @@ impl<E: StorageEngine> TransactionManager<E> {
                     format!("Row change data {:?}", row_version_node.change_data),
                 );
             }
+        }
+
+        match &row_version_node.prev_version {
+            Some(node) => {
+                let node_lock = node.blocking_read();
+                Self::get_final_column_updates(
+                    transaction_id,
+                    commit_timestamp,
+                    updated_columns,
+                    node_lock,
+                );
+            }
+            None => {}
         }
     }
 
@@ -522,7 +522,7 @@ impl<'a, E: StorageEngine> Iterator for MvccScanIterator<'a, E> {
         let row = self.row_iter.next();
         match row {
             Some(mut row_value) => {
-                println!("{:?}", row_value);
+                // println!("{:?}", row_value);
                 let row_id: u64 = row_value.as_ref().unwrap().row_id();
                 let transaction_start_timestamp = self
                     .transaction

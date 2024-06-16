@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fs::File, io::Write, sync::Arc};
 
 use libnaadandb::{
     query::{query_engine::NaadanQueryEngine, NaadanQuery},
@@ -62,19 +62,32 @@ async fn process_query(
 
     // Process the sql query Logical_Plan -> Physical_Plan -> Execute.
     let query_results = query_engine.process_query(session_context, sql_query).await;
-
+    let mut file = File::options()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open("/tmp/Naadan_db_test.log")
+        .unwrap();
+    let mut file_log_string: String;
     for query_result in query_results {
         match query_result {
             Ok(val) => {
-                query.truncate(usize::pow(2, 8));
-                println!(
+                //query.truncate(usize::pow(2, 8));
+                file_log_string = format!(
                     "Query: [{}]..... execution succeeded with result: {}",
                     query,
                     val.to_string()
-                )
+                );
             }
-            Err(err) => println!("****** Query: [{}] execution failed: {} ******", query, err),
+            Err(err) => {
+                file_log_string =
+                    format!("****** Query: [{}] execution failed: {} ******", query, err);
+            }
         }
+
+        file.write_all(format!("{}\n", file_log_string).as_bytes())
+            .unwrap();
+        file.flush().unwrap();
     }
 }
 
@@ -269,18 +282,14 @@ async fn parallel_test_none_predicate_update() {
     let transaction1 = transaction_manager.clone();
     let t1 = tokio::spawn(async move {
         let queries = [
-            //"Select * from test1",
-            //"update test1 set name = 'Ne'",
-            //"Select * from test1",
+            "Select * from test1",
+            "update test1 set name = 'InitUpdate'",
+            "Select * from test1",
             "BEGIN",
-            "update test1 set rate = 7777",
             "update test1 set rate = 77696",
-            "update test1 set name = 'LatestDate'",
-            "update test1 set rate = 2147483647",
-            // "Select * from test1",
-            // "update test1 set name = 'La'",
-            // "update test1 set id = 4",
-            // "update test1 set name = 'Tomy'",
+            "update test1 set score = 83647",
+            "update test1 set name = 'La'",
+            "update test1 set id = 4",
             "COMMIT",
             "Select * from test1",
         ];
@@ -291,12 +300,13 @@ async fn parallel_test_none_predicate_update() {
     let transaction2 = transaction_manager.clone();
     let t2 = tokio::spawn(async move {
         let queries = [
-            //"Select * from test1",
-            //"update test1 set name = 'Ne'",
-            //"Select * from test1",
+            "Select * from test1",
             "BEGIN",
             "update test1 set id = 9",
             "update test1 set name = 'JK'",
+            "update test1 set score = 234568",
+            "Select * from test1",
+            "update test1 set name = 'Fin'",
             "COMMIT",
             "Select * from test1",
         ];

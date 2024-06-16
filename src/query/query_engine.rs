@@ -562,12 +562,17 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
             }
             Statement::Commit { chain } => {
                 if session_context.transaction_id() > 0 {
-                    self.transaction_manager
-                        .commit_transaction(session_context.transaction_id())
-                        .unwrap();
+                    let result = self
+                        .transaction_manager
+                        .commit_transaction(session_context.transaction_id());
 
                     session_context.set_transaction_id(0);
                     session_context.set_transaction_type(TransactionType::Implicit);
+
+                    match result {
+                        Ok(()) => {}
+                        Err(err) => return Err(err),
+                    }
                 } else {
                     return Err(NaadanError::TransactionSessionInvalid);
                 }

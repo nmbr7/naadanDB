@@ -98,8 +98,13 @@ impl<E: StorageEngine + Send + Sync> NaadanServer<E> {
 
             tokio::spawn(async move {
                 match Self::process_request(server_instance_clone, socket, n).await {
-                    Ok(_) => println!("Request processing done"),
-                    Err(_) => error!("Request processing failed"),
+                    Ok(_) => {
+                        utils::log("Server".to_string(), "Request processing done".to_string())
+                    }
+                    Err(_) => utils::log(
+                        "Server".to_string(),
+                        "Request processing failed".to_string(),
+                    ),
                 }
             });
         }
