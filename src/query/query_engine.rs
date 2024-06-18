@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::ops::BitAnd;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -166,7 +167,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
             format!("Logical Plan is : {:?}", logical_plan),
         );
 
-        if let None = logical_plan.last().unwrap().plan_expr_root {
+        if let None = logical_plan.plan_expr {
             return Some(Ok(QueryResult::ok()));
         }
 
@@ -196,7 +197,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
     pub async fn execute<'a>(
         &self,
         session_context: &mut SessionContext,
-        physical_plan: Vec<PhysicalPlan<'a, E>>,
+        physical_plan: PhysicalPlan<'a, E>,
     ) -> Result<QueryResult, NaadanError> {
         utils::log(
             format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
@@ -217,9 +218,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
             let begin_time = SystemTime::now();
             let now = Instant::now();
 
-            for plan in &physical_plan {
-                (plan.plane_exec_fn)(&mut exec_context, plan.plan_expr.clone());
-            }
+            exec_physical_plan(&physical_plan, &mut exec_context);
 
             let elapsed_time = now.elapsed();
 
@@ -289,78 +288,29 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
     async fn prepare_physical_plan<'a>(
         &'a self,
         session_context: &mut SessionContext,
-        logical_plan: &Vec<Plan<'a>>,
-    ) -> Result<Vec<PhysicalPlan<E>>, NaadanError> {
-        let mut exec_vec: Vec<PhysicalPlan<E>> = Vec::new();
+        logical_plan: &Plan<'a>,
+    ) -> Result<PhysicalPlan<E>, NaadanError> {
+        let lp = logical_plan;
 
-        match logical_plan.last() {
-            Some(plan) => {
-                let root_exp = plan.plan_expr_root.as_ref().unwrap().borrow();
-                match &*root_exp {
-                    PlanExpr::Relational(rel_val) => match &rel_val.rel_type {
-                        RelationalExprType::ScanExpr(_) => {
-                            let physical_plan_expr =
-                                PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
-
-                            exec_vec.push(PhysicalPlan::<E>::new(
-                                physical_plan_expr,
-                                ExecContext::<E>::scan_table,
-                            ));
-                        }
-                        RelationalExprType::CreateTableExpr(_) => {
-                            let physical_plan_expr =
-                                PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
-
-                            exec_vec.push(PhysicalPlan::<E>::new(
-                                physical_plan_expr,
-                                ExecContext::<E>::create_table,
-                            ));
-                        }
-                        RelationalExprType::InsertExpr(_) => {
-                            let physical_plan_expr =
-                                PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
-
-                            exec_vec.push(PhysicalPlan::<E>::new(
-                                physical_plan_expr,
-                                ExecContext::<E>::insert_table,
-                            ));
-                        }
-                        RelationalExprType::InnerJoinExpr(_, _, _) => todo!(),
-                        RelationalExprType::FilterExpr(_) => todo!(),
-                        RelationalExprType::IndexScanExpr(IndexScanExpr { index_id: _ }) => todo!(),
-                        RelationalExprType::UpdateExpr(_) => {
-                            let physical_plan_expr =
-                                PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
-
-                            exec_vec.push(PhysicalPlan::<E>::new(
-                                physical_plan_expr,
-                                ExecContext::<E>::update_table,
-                            ));
-                        }
-                    },
-
-                    _ => {}
-                }
-            }
-            None => todo!(),
-        }
+        let plan = logical_plan;
+        let pl = prep_inner_phy_plan::<E>(plan).unwrap();
 
         utils::log(
             format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
             format!("Physical_plan prepared."),
         );
-        Ok(exec_vec)
+        Ok(pl)
     }
 
     async fn prepare_logical_plan<'a>(
         &'a self,
         session_context: &mut SessionContext,
         statement: &Statement,
-    ) -> Result<Vec<Plan<'a>>, NaadanError> {
-        let mut final_plan_list: Vec<Plan<'a>> = vec![];
+    ) -> Result<Plan<'a>, NaadanError> {
+        let mut final_plan = Plan::init();
         // Iterate through the AST and create best logical plan which potentially has the least f execution
 
-        let mut plan: Plan = Plan::init();
+        let mut plan = Plan::init();
 
         match statement {
             Statement::CreateTable { name, columns, .. } => {
@@ -439,7 +389,9 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                     stats: None,
                 });
 
-                plan.set_plan_expr_root(Some(rc_ref_cell!(local_plan)));
+                plan.set_plan_expr(Some(rc_ref_cell!(local_plan)));
+
+                final_plan = plan;
             }
             Statement::AlterTable { .. } => {}
 
@@ -489,7 +441,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                                     None,
                                 ));
 
-                                plan.set_plan_expr_root(Some(rc_ref_cell!(local_plan)));
+                                plan.set_plan_expr(Some(rc_ref_cell!(local_plan)));
                             }
                         }
                         Err(err) => {
@@ -497,6 +449,8 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                         }
                     }
                 }
+
+                final_plan = plan;
             }
             Statement::Update {
                 table,
@@ -535,12 +489,14 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                             None,
                         ));
 
-                        plan.set_plan_expr_root(Some(rc_ref_cell!(local_plan)));
+                        plan.set_plan_expr(Some(rc_ref_cell!(local_plan)));
                     }
                     Err(err) => {
                         return Err(err);
                     }
                 }
+
+                final_plan = plan;
             }
             Statement::Delete { .. } => {}
 
@@ -604,10 +560,36 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                                 return Err(err);
                             }
                         };
+
+                        let current_plan = rc_ref_cell!(plan);
+
+                        final_plan.set_plan_expr(current_plan.borrow().plan_expr.clone());
+                        final_plan.next_expr = current_plan.borrow().next_expr.clone();
+
+                        let mut temp_plan = current_plan.clone();
+
+                        let f_expr =
+                            Rc::clone(expr_group.first().unwrap().borrow().exprs.first().unwrap());
+
+                        final_plan.set_plan_expr(Some(f_expr));
+
                         //utils::log(format!("{:?}", expr_group));
-                        let first_vec = expr_group.first().unwrap();
-                        let first_expr = Rc::clone(first_vec.borrow().exprs.first().unwrap());
-                        plan.plan_expr_root = Some(first_expr);
+                        for (idd, exp_group) in expr_group.iter().skip(1).enumerate() {
+                            let expr = Rc::clone(exp_group.borrow().exprs.first().unwrap());
+
+                            let mut next_plan = Plan::init();
+                            next_plan.set_plan_expr(Some(expr));
+                            let next = rc_ref_cell!(next_plan);
+
+                            temp_plan.borrow_mut().next_expr.push(next.clone());
+
+                            if idd == 0 {
+                                final_plan.next_expr = temp_plan.borrow().next_expr.clone();
+                            }
+
+                            temp_plan = next;
+                        }
+
                         //utils::log(format!("{:?}", expr_group));
                     }
                     // TODO
@@ -633,11 +615,10 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
             }
         }
 
-        final_plan_list.push(plan);
         // TODO iterate the AST and do nomalization and pre-processing and create the Plan structure for all expressions
         // explore different combination of plan structure and emit a final plan, which will be sent for physical plan preparation.
 
-        Ok(final_plan_list)
+        Ok(final_plan)
     }
 
     async fn prepare_select_query_plan(
@@ -646,6 +627,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
         select_query: &Box<sqlparser::ast::Select>,
     ) -> Result<Vec<Edge<PlanGroup>>, NaadanError> {
         let mut plan_group_list: Vec<Edge<PlanGroup>> = vec![];
+
         for table in select_query.from.iter() {
             match &table.relation {
                 TableFactor::Table { name, .. } => {
@@ -709,13 +691,14 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                 ),
             }
         }
+
         for projection in select_query.projection.iter() {
             match projection {
                 sqlparser::ast::SelectItem::UnnamedExpr(expr) => match expr {
                     sqlparser::ast::Expr::Identifier(identifier) => {
                         utils::log(
                             format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
-                            format!("{:?}", identifier.value),
+                            format!("Projection identifier {:?}", identifier.value),
                         );
 
                         let value = PlanExpr::Scalar(Scalar {
@@ -741,11 +724,287 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
             }
         }
 
+        if let Some(selection) = &select_query.selection {
+            let predicat_expr = prepare_where_clause(
+                selection,
+                PrepareWhereFlag::BinaryOps.into(),
+                session_context,
+            )
+            .unwrap();
+
+            let value = PlanExpr::Relational(Relational {
+                rel_type: RelationalExprType::FilterExpr(rc_ref_cell!(predicat_expr)),
+                group: None,
+                stats: Some(Stats {
+                    estimated_row_count: 0,
+                    estimated_time: Duration::from_millis(0),
+                }),
+            });
+
+            let expr_group = value.set_expr_group().unwrap();
+            plan_group_list.push(expr_group);
+        }
+
         utils::log(
             format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
             format!("Select query plan Groups: {:?}", plan_group_list),
         );
+
         Ok(plan_group_list)
+    }
+}
+
+fn exec_physical_plan<'a, E: StorageEngine>(
+    physical_plan: &PhysicalPlan<'a, E>,
+    exec_context: &mut ExecContext<E>,
+) {
+    (physical_plan.plane_exec_fn)(exec_context, physical_plan.plan_expr.clone());
+    for expr in physical_plan.next_expr.iter() {
+        exec_physical_plan(
+            &PhysicalPlan::new(expr.borrow().plan_expr.clone(), expr.borrow().plane_exec_fn),
+            exec_context,
+        );
+    }
+}
+
+fn prep_inner_phy_plan<'a, E: StorageEngine>(
+    plan: &Plan<'a>,
+) -> Result<PhysicalPlan<'a, E>, NaadanError> {
+    let root_exp = plan.plan_expr.as_ref().unwrap();
+    let mut exec_plan = match &*root_exp.as_ref().borrow() {
+        PlanExpr::Relational(rel_val) => match &rel_val.rel_type {
+            RelationalExprType::ScanExpr(_) => {
+                let physical_plan_expr = PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
+
+                PhysicalPlan::<E>::new(physical_plan_expr, ExecContext::<E>::scan_table)
+            }
+            RelationalExprType::CreateTableExpr(_) => {
+                let physical_plan_expr = PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
+
+                PhysicalPlan::<E>::new(physical_plan_expr, ExecContext::<E>::create_table)
+            }
+            RelationalExprType::InsertExpr(_) => {
+                let physical_plan_expr = PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
+
+                PhysicalPlan::<E>::new(physical_plan_expr, ExecContext::<E>::insert_table)
+            }
+            RelationalExprType::InnerJoinExpr(_, _, _) => todo!(),
+            RelationalExprType::FilterExpr(_) => {
+                let physical_plan_expr = PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
+
+                PhysicalPlan::<E>::new(physical_plan_expr, ExecContext::<E>::filter)
+            }
+            RelationalExprType::IndexScanExpr(IndexScanExpr { index_id: _ }) => todo!(),
+            RelationalExprType::UpdateExpr(_) => {
+                let physical_plan_expr = PhysicalPlanExpr::Relational(rel_val.rel_type.clone());
+
+                PhysicalPlan::<E>::new(physical_plan_expr, ExecContext::<E>::update_table)
+            }
+        },
+        _ => return Err(NaadanError::PhysicalPlanFailed),
+    };
+
+    let mut aa: Vec<Rc<RefCell<PhysicalPlan<'a, E>>>> = vec![];
+    for l_expr in plan.next_expr.iter() {
+        let mut pp = Plan::init();
+        pp.set_plan_expr(l_expr.borrow().plan_expr.clone());
+        let p = prep_inner_phy_plan(&pp).unwrap();
+        aa.push(rc_ref_cell!(p));
+    }
+
+    exec_plan.next_expr = aa;
+
+    return Ok(exec_plan);
+}
+
+fn prepare_where_clause(
+    selection: &Expr,
+    flag: Flag,
+    session_context: &SessionContext,
+) -> Result<ScalarExprType, NaadanError> {
+    let mut current_expr: ScalarExprType = ScalarExprType::Const {
+        value: sqlparser::ast::Value::Null,
+    };
+
+    match selection {
+        Expr::BinaryOp { left, op, right } => {
+            let left_expr = prepare_where_clause(
+                &left,
+                PrepareWhereFlag::BinaryParams.into(),
+                session_context,
+            );
+
+            let right_expr = prepare_where_clause(
+                &right,
+                PrepareWhereFlag::BinaryParams.into(),
+                session_context,
+            );
+
+            match op {
+                sqlparser::ast::BinaryOperator::Plus => todo!(),
+                sqlparser::ast::BinaryOperator::Minus => todo!(),
+                sqlparser::ast::BinaryOperator::Multiply => todo!(),
+                sqlparser::ast::BinaryOperator::Divide => todo!(),
+                sqlparser::ast::BinaryOperator::Modulo => todo!(),
+                sqlparser::ast::BinaryOperator::StringConcat => todo!(),
+                sqlparser::ast::BinaryOperator::Gt => todo!(),
+                sqlparser::ast::BinaryOperator::Lt => todo!(),
+                sqlparser::ast::BinaryOperator::GtEq => todo!(),
+                sqlparser::ast::BinaryOperator::LtEq => todo!(),
+                sqlparser::ast::BinaryOperator::Spaceship => todo!(),
+                sqlparser::ast::BinaryOperator::Eq => {
+                    utils::log(
+                        format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                        format!("Predicate contains operation '='"),
+                    );
+                }
+                sqlparser::ast::BinaryOperator::NotEq => todo!(),
+                sqlparser::ast::BinaryOperator::And => todo!(),
+                sqlparser::ast::BinaryOperator::Or => todo!(),
+                sqlparser::ast::BinaryOperator::Xor => todo!(),
+                sqlparser::ast::BinaryOperator::BitwiseOr => todo!(),
+                sqlparser::ast::BinaryOperator::BitwiseAnd => todo!(),
+                sqlparser::ast::BinaryOperator::BitwiseXor => todo!(),
+                _ => {
+                    utils::log(
+                        format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                        format!("UnSupported binary operator {:?}", op),
+                    );
+                }
+            }
+        }
+
+        Expr::IsFalse(expr) => {
+            current_expr = prepare_where_clause(&expr, flag, session_context).unwrap();
+        }
+
+        Expr::IsNotFalse(expr) => {
+            current_expr = prepare_where_clause(&expr, flag, session_context).unwrap();
+        }
+        Expr::IsTrue(expr) => {
+            current_expr = prepare_where_clause(&expr, flag, session_context).unwrap();
+        }
+        Expr::IsNotTrue(expr) => {
+            current_expr = prepare_where_clause(&expr, flag, session_context).unwrap();
+        }
+        Expr::IsNull(expr) => {
+            current_expr = prepare_where_clause(&expr, flag, session_context).unwrap();
+        }
+        Expr::IsNotNull(expr) => {
+            current_expr = prepare_where_clause(&expr, flag, session_context).unwrap();
+        }
+
+        // Handle Identifiers like table or column name
+        // these are amongst the base cases for recursion.
+        Expr::Identifier(id) => {
+            utils::log(
+                format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                format!("Predicate contains identifier {:?}", id),
+            );
+        }
+        Expr::CompoundIdentifier(ids) => todo!(),
+
+        // Handle literal constants like numbers or string etc..
+        // these are amongst the base cases for recursion.
+        Expr::Value(val) => {
+            utils::log(
+                format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                format!("Predicate contains value {:?}", val),
+            );
+        }
+
+        _ => {
+            utils::log(
+                format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                format!("UnSupported selection predication type {:?}", selection),
+            );
+        }
+    }
+
+    return Ok(current_expr);
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+struct Flag(usize);
+
+impl Flag {
+    fn is_set(&self, rhs: PrepareWhereFlag) -> bool {
+        let a = rhs;
+
+        self & rhs == a
+    }
+
+    fn is_not_set(&self, rhs: PrepareWhereFlag) -> bool {
+        self & rhs != rhs
+    }
+}
+
+impl PartialEq<PrepareWhereFlag> for Flag {
+    fn eq(&self, other: &PrepareWhereFlag) -> bool {
+        *other as usize == self.0
+    }
+}
+
+impl BitAnd<Self> for Flag {
+    type Output = Self;
+
+    // rhs is the "right-hand side" of the expression `a & b`
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self(self.0 & rhs.0)
+    }
+}
+
+impl BitAnd<PrepareWhereFlag> for &Flag {
+    type Output = Flag;
+
+    // rhs is the "right-hand side" of the expression `a & b`
+    fn bitand(self, rhs: PrepareWhereFlag) -> Self::Output {
+        rhs & self
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum PrepareWhereFlag {
+    BinaryOps = 0x1,
+    BinaryParams = 0x2,
+}
+
+impl PartialEq<Flag> for PrepareWhereFlag {
+    fn eq(&self, other: &Flag) -> bool {
+        *self as usize == other.0
+    }
+}
+
+impl Into<Flag> for PrepareWhereFlag {
+    fn into(self) -> Flag {
+        Flag(self as usize)
+    }
+}
+
+impl BitAnd<Self> for PrepareWhereFlag {
+    type Output = Flag;
+
+    // rhs is the "right-hand side" of the expression `a & b`
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Flag(self as usize & rhs as usize)
+    }
+}
+
+impl BitAnd<Flag> for PrepareWhereFlag {
+    type Output = Flag;
+
+    // rhs is the "right-hand side" of the expression `a & b`
+    fn bitand(self, rhs: Flag) -> Self::Output {
+        Flag(self as usize & rhs.0)
+    }
+}
+
+impl BitAnd<&Flag> for PrepareWhereFlag {
+    type Output = Flag;
+
+    // rhs is the "right-hand side" of the expression `a & b`
+    fn bitand(self, rhs: &Flag) -> Self::Output {
+        Flag(self as usize & rhs.0)
     }
 }
 

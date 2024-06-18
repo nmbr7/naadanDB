@@ -27,9 +27,9 @@ pub fn log(scope: String, mut string: String) {
         .open("/tmp/Naadan_db.log")
         .unwrap();
 
-    // file.write_all(format!("{}\n", file_log_string).as_bytes())
-    //     .unwrap();
-    // file.flush().unwrap();
+    file.write_all(format!("{}\n", file_log_string).as_bytes())
+        .unwrap();
+    file.flush().unwrap();
 }
 
 #[macro_export]
