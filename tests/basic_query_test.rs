@@ -204,25 +204,15 @@ async fn test_transactional_update() {
         create_storage_instance(),
     )));
 
-    load_db_data_batch(transaction_manager.clone()).await;
-    load_db_data_batch(transaction_manager.clone()).await;
-    // load_db_data_batch(transaction_manager.clone()).await;
-    // load_db_data_batch(transaction_manager.clone()).await;
-    // load_db_data_batch(transaction_manager.clone()).await;
-    // load_db_data_batch(transaction_manager.clone()).await;
-    // load_db_data_batch(transaction_manager.clone()).await;
-    // load_db_data_batch(transaction_manager.clone()).await;
-    // load_db_data_batch(transaction_manager.clone()).await;
-    // load_db_data_batch(transaction_manager.clone()).await;
+    load_db_data_batch_with_size(10, transaction_manager.clone()).await;
 
     let queries = [
         "update test1 set name = 'To'",
-        "Select * from test1",
-        //"BEGIN",
-        //"update test1 set id = 4",
-        //"update test1 set id = 6",
-        //"COMMIT",
-        //"Select * from test1",
+        "BEGIN",
+        "update test1 set id = 4",
+        "update test1 set id = 6",
+        "COMMIT",
+        "Select id, rate from test1",
     ];
 
     process_queries(queries.as_slice(), transaction_manager).await;
@@ -256,18 +246,18 @@ async fn test_update() {
 
     process_queries(queries.as_slice(), transaction_manager.clone()).await;
 
-    // load_db_data_batch_with_size(2048, transaction_manager.clone()).await;
+    load_db_data_batch_with_size(200, transaction_manager.clone()).await;
 
-    // let queries = [
-    //     "BEGIN",
-    //     "update test1 set rate = 9898",
-    //     "update test1 set name = 'newestDate'",
-    //     "update test1 set rate = 333347",
-    //     "COMMIT",
-    //     "Select * from test1",
-    // ];
+    let queries = [
+        "BEGIN",
+        "update test1 set rate = 9898",
+        "update test1 set name = 'newestDate'",
+        "update test1 set rate = 333347",
+        "COMMIT",
+        "Select * from test1",
+    ];
 
-    // process_queries(queries.as_slice(), transaction_manager.clone()).await;
+    process_queries(queries.as_slice(), transaction_manager.clone()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -369,9 +359,21 @@ async fn parallel_test_none_predicate_update() {
     // let _ = t5.await;
 }
 
-// TODO: Update Test with predicate
+#[tokio::test(flavor = "multi_thread")]
+async fn test_select_with_predicate() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
 
-// TODO: Select Test with predicate
+    load_db_data_batch_with_size(10, transaction_manager.clone()).await;
+
+    let queries = ["Select * from test1 where id = 8"];
+
+    process_queries(queries.as_slice(), transaction_manager.clone()).await;
+}
+
+// TODO: Update Test with predicate
 
 // TODO: Select Test with 'join'
 

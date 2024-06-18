@@ -268,7 +268,23 @@ impl<E: StorageEngine> ExecContext<E> {
         self.set_last_op_status(Some(!error));
     }
 
-    pub fn filter(&mut self, physical_plan: PhysicalPlanExpr) {}
+    pub fn filter(&mut self, physical_plan: PhysicalPlanExpr) {
+        utils::log(
+            format!(
+                "QueryEngine::Executor - TID: {:?}",
+                self.transaction.as_ref().unwrap().id()
+            ),
+            format!("Filtering"),
+        );
+
+        utils::log(
+            format!(
+                "QueryEngine::Executor - TID: {:?}",
+                self.transaction.as_ref().unwrap().id()
+            ),
+            format!("Last result is {:?}", self.last_result),
+        );
+    }
 
     pub fn join_table(&mut self, physical_plan: PhysicalPlanExpr) {}
 }

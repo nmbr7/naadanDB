@@ -5,9 +5,10 @@ use std::{
     process::Output,
     rc::{Rc, Weak},
     time::Duration,
+    vec,
 };
 
-use sqlparser::ast::Expr;
+use sqlparser::ast::{Expr, Value};
 use tokio::task::futures;
 
 use crate::{
@@ -114,7 +115,7 @@ pub enum RelationalExprType<'a> {
     InsertExpr(InsertExpr),
     UpdateExpr(UpdateExpr),
 
-    FilterExpr(Edge<PlanExpr<'a>>),
+    FilterExpr(Edge<ScalarExprType>),
 
     InnerJoinExpr(Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>, Edge<PlanExpr<'a>>),
     IndexScanExpr(IndexScanExpr),
@@ -138,11 +139,12 @@ pub enum ScalarExprType {
         left: Box<ScalarExprType>,
         right: Box<ScalarExprType>,
     },
+
     Identifier {
         value: String,
     },
     Const {
-        value: u64,
+        value: Value,
     },
 }
 
@@ -158,6 +160,7 @@ pub type PlanExecFn<E> = fn(context: &mut ExecContext<E>, PhysicalPlanExpr);
 pub struct PhysicalPlan<'a, E: StorageEngine> {
     pub plan_expr: PhysicalPlanExpr<'a>,
     pub plane_exec_fn: PlanExecFn<E>,
+    pub next_expr: Vec<Edge<PhysicalPlan<'a, E>>>,
 }
 
 impl<'a, E: StorageEngine> PhysicalPlan<'a, E> {
@@ -165,6 +168,7 @@ impl<'a, E: StorageEngine> PhysicalPlan<'a, E> {
         Self {
             plan_expr,
             plane_exec_fn,
+            next_expr: vec![],
         }
     }
 }
@@ -173,7 +177,7 @@ unsafe impl<'a, E: StorageEngine> Send for PhysicalPlan<'a, E> {}
 
 unsafe impl<'a, E: StorageEngine> Sync for PhysicalPlan<'a, E> {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Relational<'a> {
     pub rel_type: RelationalExprType<'a>,
     pub group: Option<WeakEdge<PlanGroup<'a>>>,
@@ -194,14 +198,14 @@ impl<'a> Relational<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Scalar<'a> {
     pub rel_type: ScalarExprType,
     pub group: Option<WeakEdge<PlanGroup<'a>>>,
     pub stats: Option<Stats>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PlanExpr<'a> {
     Relational(Relational<'a>),
     Scalar(Scalar<'a>),
@@ -232,13 +236,17 @@ impl<'a> PlanExpr<'a> {
     }
 }
 
+// Logical group representing a query proocessing step
+// Contains
 #[derive(Debug)]
 pub struct PlanGroup<'a> {
+    // Collection of expressions with same symantics
     pub exprs: Vec<Edge<PlanExpr<'a>>>,
+    // Best case expression from the `exprs` collection
     pub best_expr: Option<Edge<PlanExpr<'a>>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stats {
     pub estimated_row_count: u32,
     pub estimated_time: Duration,
@@ -257,19 +265,21 @@ impl Stats {
 #[derive(Debug)]
 pub struct Plan<'a> {
     pub plan_stats: Option<Stats>,
-    pub plan_expr_root: Option<Edge<PlanExpr<'a>>>,
+    pub plan_expr: Option<Edge<PlanExpr<'a>>>,
+    pub next_expr: Vec<Edge<Plan<'a>>>,
 }
 
 impl<'a> Plan<'a> {
     pub fn init() -> Self {
         Self {
             plan_stats: None,
-            plan_expr_root: None,
+            plan_expr: None,
+            next_expr: vec![],
         }
     }
 
-    pub fn set_plan_expr_root(&mut self, plan_expr_root: Option<Edge<PlanExpr<'a>>>) {
-        self.plan_expr_root = plan_expr_root;
+    pub fn set_plan_expr(&mut self, plan_expr: Option<Edge<PlanExpr<'a>>>) {
+        self.plan_expr = plan_expr;
     }
 }
 
