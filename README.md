@@ -12,7 +12,7 @@ naadanDB
 # Project Goals
 1. Learn and experiment with various database design techniques.
 2. Implement a database that efficiently handles hybrid (OLTP & OLAP) workloads.
-3. Create a detailed documentation describing the pros & cons of different techniques.
+3. Create documentation about different techniques.
 
 # Build
 
