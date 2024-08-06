@@ -51,8 +51,8 @@ Most core components are written from scratch except for the parser, for which w
   - [x] Support Serializable Isolation level
 - Storage Layer
   - [x] Row store format
-  - [ ] B-tree index
-  - [x] Binary format for Page structure (No extra serialization required)
+  - [x] B-tree index
+  - [x] Custom binary Page structure
 
 # Benchmark
 
