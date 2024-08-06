@@ -607,6 +607,7 @@ impl<E: StorageEngine> StorageEngine for MvccTransaction<E> {
                         row_ids.push(row_id);
 
                         let transaction_id = self.id.load(std::sync::atomic::Ordering::Relaxed);
+
                         let new_base_row_node =
                             Arc::new(RwLock::new(Box::new(RowVersionNode::new(
                                 AtomicU64::new(transaction_id),
@@ -615,16 +616,25 @@ impl<E: StorageEngine> StorageEngine for MvccTransaction<E> {
                                 None,
                             ))));
 
-                        // TODO: Check whether the row already exist in the transaction change map
-                        //       if exists, then it means that the row is getting updated the second
-                        //       time in the same transaction context.
+                        let mut write_lock = self.change_map.blocking_write();
+                        match write_lock.get_mut(&row_id) {
+                            Some(row_version_node) => {
+                                // Update the existing transaction row version change map
+                                row_version_node
+                                    .blocking_write()
+                                    .change_data
+                                    .append(&mut updates_columns.clone())
+                            }
+                            None => {
+                                drop(write_lock);
+                                // Add row change in transaction manager global row version change map
+                                self.transaction_manager()
+                                    .set_row_version_map(row_id, new_base_row_node.clone());
 
-                        // Add row change in transaction manager global row version change map
-                        self.transaction_manager()
-                            .set_row_version_map(row_id, new_base_row_node.clone());
-
-                        // Add row change in current transaction row version change map
-                        self.set_row_version_node(row_id, new_base_row_node);
+                                // Add row change in current transaction row version change map
+                                self.set_row_version_node(row_id, new_base_row_node);
+                            }
+                        }
                     }
 
                     Err(_) => continue,
