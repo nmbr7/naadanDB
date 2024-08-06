@@ -4,6 +4,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use sqlparser::ast::{Expr, Value};
 use tokio::task;
 
 use crate::{
@@ -11,12 +12,12 @@ use crate::{
         plan::{RelationalExprType, ScalarExprType},
         RecordSet,
     },
-    storage::{catalog, CatalogEngine, ScanType, StorageEngine},
+    storage::{catalog, CatalogEngine, NaadanError, ScanType, StorageEngine},
     transaction::MvccTransaction,
     utils,
 };
 
-use super::plan::PhysicalPlanExpr;
+use super::{plan::PhysicalPlanExpr, NaadanRecord};
 
 /// Execution context for the physical plan executor
 pub struct ExecContext<E: StorageEngine> {
@@ -284,7 +285,115 @@ impl<E: StorageEngine> ExecContext<E> {
             ),
             format!("Last result is {:?}", self.last_result),
         );
+
+        if let PhysicalPlanExpr::Relational(RelationalExprType::FilterExpr(expr)) = physical_plan {
+            {
+                let mut error = false;
+                let mut result: RecordSet = RecordSet::new(vec![]);
+
+                for row in self.last_result.as_ref().unwrap() {
+                    // TODO: do proper error check
+                    let res = eval_predicate(&expr.borrow(), row);
+                    match res {
+                        Ok(Value::Boolean(true)) => result.add_record(row.clone()),
+                        Ok(Value::Boolean(false)) => {}
+                        _ => {
+                            error = true;
+                            break;
+                        }
+                    }
+                }
+                self.set_last_result(Some(result));
+                self.set_last_op_status(Some(!error));
+            }
+        }
     }
 
     pub fn join_table(&mut self, physical_plan: PhysicalPlanExpr) {}
+}
+
+fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Value, NaadanError> {
+    match expr {
+        ScalarExprType::Eq { left, right } => {
+            let l = eval_predicate(&left, record).unwrap();
+            let r = eval_predicate(&right, record).unwrap();
+            let res = match (l, r) {
+                (Value::Boolean(lv), Value::Boolean(rv)) => Value::Boolean(lv == rv),
+                (Value::Number(lv, _), Value::Number(rv, _)) => Value::Boolean(lv.eq(&rv)),
+                (Value::SingleQuotedString(lv), Value::SingleQuotedString(rv)) => {
+                    Value::Boolean(lv.eq(&rv))
+                }
+                _ => Value::Boolean(false),
+            };
+
+            Ok(res)
+        }
+        ScalarExprType::NEq { left, right } => {
+            let l = eval_predicate(&left, record).unwrap();
+            let r = eval_predicate(&right, record).unwrap();
+            let res = match (l, r) {
+                (Value::Boolean(lv), Value::Boolean(rv)) => Value::Boolean(lv != rv),
+                (Value::Number(lv, _), Value::Number(rv, _)) => Value::Boolean(lv.ne(&rv)),
+                (Value::SingleQuotedString(lv), Value::SingleQuotedString(rv)) => {
+                    Value::Boolean(lv.ne(&rv))
+                }
+                _ => Value::Boolean(false),
+            };
+
+            Ok(res)
+        }
+        ScalarExprType::Gt { left, right } => {
+            let l = eval_predicate(&left, record).unwrap();
+            let r = eval_predicate(&right, record).unwrap();
+            let res = match (l, r) {
+                (Value::Boolean(lv), Value::Boolean(rv)) => Err(NaadanError::Unknown),
+                (Value::Number(lv, _), Value::Number(rv, _)) => {
+                    let lv_int = lv.parse::<usize>().unwrap();
+                    let rv_int = rv.parse::<usize>().unwrap();
+                    Ok(Value::Boolean(lv_int.gt(&rv_int)))
+                }
+                (Value::SingleQuotedString(lv), Value::SingleQuotedString(rv)) => {
+                    Ok({ Value::Boolean(lv.gt(&rv)) })
+                }
+                _ => Ok(Value::Boolean(false)),
+            };
+
+            res
+        }
+        ScalarExprType::Lt { left, right } => {
+            let l = eval_predicate(&left, record).unwrap();
+            let r = eval_predicate(&right, record).unwrap();
+            let res = match (l, r) {
+                (Value::Boolean(lv), Value::Boolean(rv)) => Err(NaadanError::Unknown),
+                (Value::Number(lv, _), Value::Number(rv, _)) => {
+                    let lv_int = lv.parse::<usize>().unwrap();
+                    let rv_int = rv.parse::<usize>().unwrap();
+                    Ok(Value::Boolean(lv_int.lt(&rv_int)))
+                }
+                (Value::SingleQuotedString(lv), Value::SingleQuotedString(rv)) => {
+                    Ok(Value::Boolean(lv.lt(&rv)))
+                }
+                _ => Ok(Value::Boolean(false)),
+            };
+
+            res
+        }
+
+        ScalarExprType::Identifier { value } => {
+            let col_val = record.column_schema().unwrap().get(value).unwrap();
+
+            match col_val.column_type {
+                catalog::ColumnType::UnSupported => Err(NaadanError::Unknown),
+                _ => {
+                    // TODO: Fix column index not known issue.
+                    if let Some(Expr::Value(val)) = record.columns().get(col_val.offset as usize) {
+                        Ok(val.clone())
+                    } else {
+                        Err(NaadanError::Unknown)
+                    }
+                }
+            }
+        }
+        ScalarExprType::Const { value } => return Ok(value.clone()),
+    }
 }

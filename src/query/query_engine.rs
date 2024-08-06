@@ -848,8 +848,26 @@ fn prepare_where_clause(
                 sqlparser::ast::BinaryOperator::Divide => todo!(),
                 sqlparser::ast::BinaryOperator::Modulo => todo!(),
                 sqlparser::ast::BinaryOperator::StringConcat => todo!(),
-                sqlparser::ast::BinaryOperator::Gt => todo!(),
-                sqlparser::ast::BinaryOperator::Lt => todo!(),
+                sqlparser::ast::BinaryOperator::Gt => {
+                    utils::log(
+                        format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                        format!("Predicate contains operation '!='"),
+                    );
+                    current_expr = ScalarExprType::Gt {
+                        left: Box::new(left_expr.unwrap()),
+                        right: Box::new(right_expr.unwrap()),
+                    }
+                }
+                sqlparser::ast::BinaryOperator::Lt => {
+                    utils::log(
+                        format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                        format!("Predicate contains operation '!='"),
+                    );
+                    current_expr = ScalarExprType::Lt {
+                        left: Box::new(left_expr.unwrap()),
+                        right: Box::new(right_expr.unwrap()),
+                    }
+                }
                 sqlparser::ast::BinaryOperator::GtEq => todo!(),
                 sqlparser::ast::BinaryOperator::LtEq => todo!(),
                 sqlparser::ast::BinaryOperator::Spaceship => todo!(),
@@ -858,8 +876,21 @@ fn prepare_where_clause(
                         format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
                         format!("Predicate contains operation '='"),
                     );
+                    current_expr = ScalarExprType::Eq {
+                        left: Box::new(left_expr.unwrap()),
+                        right: Box::new(right_expr.unwrap()),
+                    }
                 }
-                sqlparser::ast::BinaryOperator::NotEq => todo!(),
+                sqlparser::ast::BinaryOperator::NotEq => {
+                    utils::log(
+                        format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                        format!("Predicate contains operation '!='"),
+                    );
+                    current_expr = ScalarExprType::NEq {
+                        left: Box::new(left_expr.unwrap()),
+                        right: Box::new(right_expr.unwrap()),
+                    }
+                }
                 sqlparser::ast::BinaryOperator::And => todo!(),
                 sqlparser::ast::BinaryOperator::Or => todo!(),
                 sqlparser::ast::BinaryOperator::Xor => todo!(),
@@ -902,6 +933,9 @@ fn prepare_where_clause(
                 format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
                 format!("Predicate contains identifier {:?}", id),
             );
+            current_expr = ScalarExprType::Identifier {
+                value: id.value.clone(),
+            }
         }
         Expr::CompoundIdentifier(ids) => todo!(),
 
@@ -912,6 +946,8 @@ fn prepare_where_clause(
                 format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
                 format!("Predicate contains value {:?}", val),
             );
+
+            current_expr = ScalarExprType::Const { value: val.clone() }
         }
 
         _ => {

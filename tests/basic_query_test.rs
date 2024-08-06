@@ -375,9 +375,14 @@ async fn test_select_with_predicate() {
         create_storage_instance(),
     )));
 
-    load_db_data_batch_with_size(10, transaction_manager.clone()).await;
+    load_db_data_batch_with_size(1024, transaction_manager.clone()).await;
 
-    let queries = ["Select * from test1 where id = 8"];
+    let queries = [
+        "Select * from test1",
+        "Select * from test1",
+        "Select * from test1 where id > 1000",
+        "Select * from test1 where id < 100",
+    ];
 
     process_queries(queries.as_slice(), transaction_manager.clone()).await;
 }
