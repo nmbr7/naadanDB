@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::BitAnd;
 use std::rc::Rc;
@@ -676,6 +676,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                     let expr_group = value.set_expr_group().unwrap();
                     plan_group_list.push(expr_group);
                 }
+
                 // TODO
                 // sqlparser::ast::TableFactor::Derived { lateral, subquery, alias } => todo!(),
                 // sqlparser::ast::TableFactor::TableFunction { expr, alias } => todo!(),

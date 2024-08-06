@@ -9,7 +9,7 @@ use tokio::{
 };
 
 use super::{
-    page::{CatalogPage, Page, PageId, PageType},
+    page::{CatalogPage, Page, PageId},
     CatalogEngine, NaadanError, RowIdType, ScanType, StorageEngine, TableIdType,
 };
 use crate::storage::catalog::*;

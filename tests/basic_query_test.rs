@@ -55,20 +55,29 @@ async fn process_query(
     mut query: String,
     transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
 ) {
-    // Parse the provided SQL query.
-    let sql_query = NaadanQuery::init(query.clone()).unwrap();
-    // Init a new query engine instance with reference to the global shared storage engine.
-    let query_engine = NaadanQueryEngine::init(transaction_manager).await;
-
-    // Process the sql query Logical_Plan -> Physical_Plan -> Execute.
-    let query_results = query_engine.process_query(session_context, sql_query).await;
     let mut file = File::options()
         .create(true)
         .write(true)
         .append(true)
         .open("/tmp/Naadan_db_test.log")
         .unwrap();
+
     let mut file_log_string: String;
+
+    // Parse the provided SQL query.
+    let sql_query = NaadanQuery::init(query.clone()).unwrap();
+    // Init a new query engine instance with reference to the global shared storage engine.
+    let query_engine = NaadanQueryEngine::init(transaction_manager).await;
+
+    file_log_string = format!("Started Query: [{}]", query,);
+
+    file.write_all(format!("{}\n", file_log_string).as_bytes())
+        .unwrap();
+    file.flush().unwrap();
+
+    // Process the sql query Logical_Plan -> Physical_Plan -> Execute.
+    let query_results = query_engine.process_query(session_context, sql_query).await;
+
     for query_result in query_results {
         match query_result {
             Ok(val) => {
@@ -80,12 +89,11 @@ async fn process_query(
                 );
             }
             Err(err) => {
-                file_log_string =
-                    format!("****** Query: [{}] execution failed: {} ******", query, err);
+                file_log_string = format!("Query: [{}] execution failed: {} ", query, err);
             }
         }
 
-        file.write_all(format!("{}\n", file_log_string).as_bytes())
+        file.write_all(format!("Finished {}\n", file_log_string).as_bytes())
             .unwrap();
         file.flush().unwrap();
     }
@@ -267,18 +275,18 @@ async fn parallel_test_none_predicate_update() {
         create_storage_instance(),
     )));
 
-    load_db_data_batch_with_size(1024, transaction_manager.clone()).await;
+    load_db_data_batch_with_size(215, transaction_manager.clone()).await;
 
     let transaction1 = transaction_manager.clone();
     let t1 = tokio::spawn(async move {
         let queries = [
             "Select * from test1",
-            "update test1 set name = 'InitUpdate'",
+            "update test1 set name = 'InitCh'",
             "Select * from test1",
             "BEGIN",
             "update test1 set rate = 77696",
             "update test1 set score = 83647",
-            "update test1 set name = 'La'",
+            "update test1 set name = 'Laaaaaaaaaaaaaaaaaaa'",
             "update test1 set id = 4",
             "COMMIT",
             "Select * from test1",
@@ -298,6 +306,7 @@ async fn parallel_test_none_predicate_update() {
             "Select * from test1",
             "update test1 set name = 'Fin'",
             "COMMIT",
+            "Select * from test1",
             "Select * from test1",
         ];
 

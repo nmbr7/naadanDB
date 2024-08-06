@@ -19,13 +19,13 @@ use std::{
 use crate::{
     query::{NaadanRecord, RecordSet},
     storage::utils::write_string_to_buf,
-    utils::{self, log},
+    utils::{self},
 };
 
-const DB_DATAFILE: &str = "/tmp/DB_data_file.bin";
 const DB_TABLE_CATALOG_FILE: &str = "/tmp/DB_table_catalog_file.bin";
 const DB_TABLE_DATA_FILE: &str = "/tmp/DB_table_{table_id}_file.bin";
 const DEFAULT_DYNAMIC_PAGE_REGION_OFFSET: u32 = 1024;
+const EXTRA_PADDING: u32 = 2;
 
 pub(crate) type Id = u32;
 pub(crate) type Offset = u32;
@@ -706,7 +706,8 @@ impl Page {
                 .iter()
                 .map(|val| get_var_column_len(val.1))
                 .reduce(|x1, x2| x1 + x2 + 2)
-                .unwrap() as u64;
+                .unwrap() as u64
+                + EXTRA_PADDING as u64;
 
             if dyn_cursor_base + last_dyn_offset + var_column_len
                 >= self.header.last_fixed_size_offset as u64
@@ -910,10 +911,8 @@ fn write_column_value(
                 let number = val.parse::<i32>().unwrap();
                 buf_cursor.write_all(&number.to_be_bytes()).unwrap();
             }
-            sqlparser::ast::Value::SingleQuotedString(val) => {
-                write_string_to_buf(dyn_cursor_base, last_dyn_offset, buf_cursor, val);
-            }
-            sqlparser::ast::Value::DoubleQuotedString(val) => {
+            sqlparser::ast::Value::SingleQuotedString(val)
+            | sqlparser::ast::Value::DoubleQuotedString(val) => {
                 write_string_to_buf(dyn_cursor_base, last_dyn_offset, buf_cursor, val);
             }
             sqlparser::ast::Value::Boolean(val) => {
