@@ -8,14 +8,17 @@ use std::{
 };
 
 use env_logger::Target;
-use sqlparser::{ast::Expr, keywords::RLIKE};
+use sqlparser::{
+    ast::{Expr, Value},
+    keywords::RLIKE,
+};
 use tokio::{
     sync::{Mutex, RwLock, RwLockReadGuard},
     task,
 };
 
 use crate::{
-    query::{NaadanRecord, RecordSet},
+    query::{kernel, NaadanRecord, RecordSet},
     storage::{
         storage_engine::{self, NaadanStorageEngine, ScanIterator},
         CatalogEngine, NaadanError, RowIdType, ScanType, StorageEngine,
@@ -247,7 +250,7 @@ impl<E: StorageEngine> TransactionManager<E> {
             transaction.set_commit_timestamp(commit_timestamp);
 
             utils::log(format!("Transaction - TID: {:?}", transaction_id),
-            format!("Commiting  transaction with ID: [{:?}] Start timestamp: [{:?}] Commit timestamp: [{:?}]",
+            format!("Commiting transaction with ID: [{:?}] Start timestamp: [{:?}] Commit timestamp: [{:?}]",
             transaction.id, transaction.start_timestamp,transaction.commit_timstamp));
 
             // TODO: Validation and write to committed_transaction map should happen atomically
@@ -277,7 +280,10 @@ impl<E: StorageEngine> TransactionManager<E> {
 
                 utils::log(
                     format!("Transaction - TID: {:?}", transaction_id),
-                    format!("Final Updated row {:?}", updated_columns),
+                    format!(
+                        "Final Updated row {:?} for row id {:?}",
+                        updated_columns, row_id
+                    ),
                 );
                 self.storage_engine()
                     .update_table_rows(
@@ -462,16 +468,19 @@ impl<E: StorageEngine> MvccTransaction<E> {
 
 pub struct MvccScanIterator<'a, E: StorageEngine> {
     transaction: &'a MvccTransaction<E>,
+    scan_type: &'a ScanType,
     row_iter: Box<dyn Iterator<Item = Result<NaadanRecord, NaadanError>> + 'a>,
 }
 
 impl<'a, E: StorageEngine> MvccScanIterator<'a, E> {
     pub fn new(
         transaction: &'a MvccTransaction<E>,
+        scan_type: &'a ScanType,
         row_iter: Box<dyn Iterator<Item = Result<NaadanRecord, NaadanError>> + 'a>,
     ) -> Self {
         Self {
             transaction,
+            scan_type,
             row_iter,
         }
     }
@@ -489,14 +498,16 @@ impl<'a, E: StorageEngine> MvccScanIterator<'a, E> {
                 .id
                 .load(std::sync::atomic::Ordering::Acquire);
 
+            utils::log(
+                format!("Transaction - TID: {:?}", self.transaction.id),
+                format!(
+                    "Change committed at: {:?} and transaction_start_timestamp is: {:?}",
+                    row_change_data_id, transaction_start_timestamp
+                ),
+            );
             if row_change_data_id == transaction_id
                 || row_change_data_id < transaction_start_timestamp
             {
-                utils::log(
-                    format!("Transaction - TID: {:?}", self.transaction.id),
-                    format!("Change committed at: {:?}", row_change_data_id),
-                );
-
                 let record = row_value.as_mut().unwrap();
                 for column in &row_change_node.change_data {
                     record.update_column_value(column)
@@ -519,48 +530,69 @@ impl<'a, E: StorageEngine> Iterator for MvccScanIterator<'a, E> {
     type Item = Result<NaadanRecord, NaadanError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let row = self.row_iter.next();
-        match row {
-            Some(mut row_value) => {
-                // println!("{:?}", row_value);
-                let row_id: u64 = row_value.as_ref().unwrap().row_id();
-                let transaction_start_timestamp = self
-                    .transaction
-                    .start_timestamp
-                    .load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            utils::log(
+                format!("Transaction - TID: {:?}", self.transaction.id),
+                format!("MvccScanIterator: loop"),
+            );
 
-                let transaction_id = self
-                    .transaction
-                    .id
-                    .load(std::sync::atomic::Ordering::Relaxed);
+            let row = self.row_iter.next();
+            match row {
+                Some(mut row_value) => {
+                    // println!("{:?}", row_value);
+                    let row_id: u64 = row_value.as_ref().unwrap().row_id();
+                    let transaction_start_timestamp = self
+                        .transaction
+                        .start_timestamp
+                        .load(std::sync::atomic::Ordering::Relaxed);
 
-                let row_version_map_value = self
-                    .transaction
-                    .transaction_manager()
-                    .row_version_node(row_id);
+                    let transaction_id = self
+                        .transaction
+                        .id
+                        .load(std::sync::atomic::Ordering::Relaxed);
 
-                if let Some(row_version_map_val) = row_version_map_value {
-                    utils::log(
-                        format!("Transaction - TID: {:?}", self.transaction.id),
-                        format!("Before: {:?}", row_value),
-                    );
+                    let row_version_map_value = self
+                        .transaction
+                        .transaction_manager()
+                        .row_version_node(row_id);
 
-                    self.reduce_record_value(
-                        row_version_map_val,
-                        transaction_id,
-                        transaction_start_timestamp,
-                        &mut row_value,
-                    );
+                    if let Some(row_version_map_val) = row_version_map_value {
+                        utils::log(
+                            format!("Transaction - TID: {:?}", self.transaction.id),
+                            format!("Before: {:?}", row_value),
+                        );
 
-                    utils::log(
-                        format!("Transaction - TID: {:?}", self.transaction.id),
-                        format!("After: {:?}", row_value),
-                    );
+                        self.reduce_record_value(
+                            row_version_map_val,
+                            transaction_id,
+                            transaction_start_timestamp,
+                            &mut row_value,
+                        );
+
+                        utils::log(
+                            format!("Transaction - TID: {:?}", self.transaction.id),
+                            format!("After: {:?}", row_value),
+                        );
+                    }
+
+                    match self.scan_type {
+                        ScanType::Filter(predicate) => {
+                            // TODO: do proper error check
+                            let res =
+                                kernel::eval_predicate(&predicate, row_value.as_ref().unwrap());
+                            match res {
+                                Ok(Value::Boolean(true)) => return Some(row_value),
+                                _ => {
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    return Some(row_value);
                 }
-
-                Some(row_value)
+                None => return None,
             }
-            None => return None,
         }
     }
 }
@@ -581,7 +613,7 @@ impl<E: StorageEngine> StorageEngine for MvccTransaction<E> {
         schema: &'a crate::storage::catalog::Table,
     ) -> MvccScanIterator<'_, E> {
         let row_iter = self.storage_engine().scan_table(scan_type, schema);
-        MvccScanIterator::new(self, Box::new(row_iter))
+        MvccScanIterator::new(self, scan_type, Box::new(row_iter))
     }
 
     fn delete_table_rows(
@@ -608,14 +640,6 @@ impl<E: StorageEngine> StorageEngine for MvccTransaction<E> {
 
                         let transaction_id = self.id.load(std::sync::atomic::Ordering::Relaxed);
 
-                        let new_base_row_node =
-                            Arc::new(RwLock::new(Box::new(RowVersionNode::new(
-                                AtomicU64::new(transaction_id),
-                                updates_columns.clone(),
-                                schema.name.clone(),
-                                None,
-                            ))));
-
                         let mut write_lock = self.change_map.blocking_write();
                         match write_lock.get_mut(&row_id) {
                             Some(row_version_node) => {
@@ -624,9 +648,19 @@ impl<E: StorageEngine> StorageEngine for MvccTransaction<E> {
                                     .blocking_write()
                                     .change_data
                                     .append(&mut updates_columns.clone())
+                                // TODO: store old column value also, required for historic read
                             }
                             None => {
                                 drop(write_lock);
+
+                                let new_base_row_node =
+                                    Arc::new(RwLock::new(Box::new(RowVersionNode::new(
+                                        AtomicU64::new(transaction_id),
+                                        updates_columns.clone(),
+                                        schema.name.clone(),
+                                        None,
+                                    ))));
+
                                 // Add row change in transaction manager global row version change map
                                 self.transaction_manager()
                                     .set_row_version_map(row_id, new_base_row_node.clone());

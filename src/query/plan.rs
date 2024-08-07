@@ -212,7 +212,7 @@ pub enum PlanExpr<'a> {
 }
 
 impl<'a> PlanExpr<'a> {
-    pub fn set_expr_group(self) -> Result<Edge<PlanGroup<'a>>, bool> {
+    pub fn init_expr_group(self) -> Result<Edge<PlanGroup<'a>>, bool> {
         let expr_grp = rc_ref_cell!(PlanGroup {
             exprs: vec![],
             best_expr: None,

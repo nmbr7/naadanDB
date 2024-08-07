@@ -467,6 +467,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                     _ => {}
                 }
 
+                let mut plan_group_list: Vec<Edge<PlanGroup>> = vec![];
                 let storage_instance = self.transaction_manager.storage_engine();
 
                 match storage_instance.get_table_details(&table_name) {
@@ -481,22 +482,39 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                             columns.insert(id.last().unwrap().value.clone(), val.clone());
                         }
 
-                        let local_plan = PlanExpr::Relational(Relational::new(
+                        let predicat_expr: Option<ScalarExprType> =
+                            if let Some(selection) = &selection {
+                                match prepare_where_clause(
+                                    selection,
+                                    PrepareWhereFlag::BinaryOps.into(),
+                                    session_context,
+                                ) {
+                                    Ok(expr) => Some(expr),
+                                    Err(_) => None,
+                                }
+                            } else {
+                                None
+                            };
+
+                        let value = PlanExpr::Relational(Relational::new(
                             RelationalExprType::UpdateExpr(UpdateExpr::new(
-                                table_name, columns, None,
+                                table_name,
+                                columns,
+                                predicat_expr,
                             )),
                             None,
                             None,
                         ));
 
-                        plan.set_plan_expr(Some(rc_ref_cell!(local_plan)));
+                        let expr_group = value.init_expr_group().unwrap();
+                        plan_group_list.push(expr_group);
                     }
                     Err(err) => {
                         return Err(err);
                     }
                 }
 
-                final_plan = plan;
+                load_final_plan(&plan_group_list, &mut final_plan);
             }
             Statement::Delete { .. } => {}
 
@@ -547,7 +565,8 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                         let result = self
                             .prepare_select_query_plan(session_context, select_query)
                             .await;
-                        let expr_group = match result {
+
+                        let plan_group_list = match result {
                             Ok(val) => val,
                             Err(err) => {
                                 utils::log(
@@ -561,34 +580,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                             }
                         };
 
-                        let current_plan = rc_ref_cell!(plan);
-
-                        final_plan.set_plan_expr(current_plan.borrow().plan_expr.clone());
-                        final_plan.next_expr = current_plan.borrow().next_expr.clone();
-
-                        let mut temp_plan = current_plan.clone();
-
-                        let f_expr =
-                            Rc::clone(expr_group.first().unwrap().borrow().exprs.first().unwrap());
-
-                        final_plan.set_plan_expr(Some(f_expr));
-
-                        //utils::log(format!("{:?}", expr_group));
-                        for (idd, exp_group) in expr_group.iter().skip(1).enumerate() {
-                            let expr = Rc::clone(exp_group.borrow().exprs.first().unwrap());
-
-                            let mut next_plan = Plan::init();
-                            next_plan.set_plan_expr(Some(expr));
-                            let next = rc_ref_cell!(next_plan);
-
-                            temp_plan.borrow_mut().next_expr.push(next.clone());
-
-                            if idd == 0 {
-                                final_plan.next_expr = temp_plan.borrow().next_expr.clone();
-                            }
-
-                            temp_plan = next;
-                        }
+                        load_final_plan(&plan_group_list, &mut final_plan);
 
                         //utils::log(format!("{:?}", expr_group));
                     }
@@ -673,7 +665,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                         }),
                     });
 
-                    let expr_group = value.set_expr_group().unwrap();
+                    let expr_group = value.init_expr_group().unwrap();
                     plan_group_list.push(expr_group);
                 }
 
@@ -713,7 +705,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                             }),
                         });
 
-                        let expr_group = value.set_expr_group().unwrap();
+                        let expr_group = value.init_expr_group().unwrap();
                         plan_group_list.push(expr_group);
                     }
                     _ => {}
@@ -742,7 +734,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                 }),
             });
 
-            let expr_group = value.set_expr_group().unwrap();
+            let expr_group = value.init_expr_group().unwrap();
             plan_group_list.push(expr_group);
         }
 
@@ -752,6 +744,31 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
         );
 
         Ok(plan_group_list)
+    }
+}
+
+fn load_final_plan<'a>(expr_group: &Vec<Rc<RefCell<PlanGroup<'a>>>>, final_plan: &mut Plan<'a>) {
+    let mut local_base_plan = rc_ref_cell!(Plan::init());
+
+    let f_expr = Rc::clone(expr_group.first().unwrap().borrow().exprs.first().unwrap());
+
+    final_plan.set_plan_expr(Some(f_expr));
+
+    //utils::log(format!("{:?}", expr_group));
+    for (idd, exp_group) in expr_group.iter().skip(1).enumerate() {
+        let expr = Rc::clone(exp_group.borrow().exprs.first().unwrap());
+
+        let mut next_plan = Plan::init();
+        next_plan.set_plan_expr(Some(expr));
+        let next = rc_ref_cell!(next_plan);
+
+        local_base_plan.borrow_mut().next_expr.push(next.clone());
+
+        if idd == 0 {
+            final_plan.next_expr = local_base_plan.borrow().next_expr.clone();
+        }
+
+        local_base_plan = next;
     }
 }
 
@@ -851,7 +868,7 @@ fn prepare_where_clause(
                 sqlparser::ast::BinaryOperator::Gt => {
                     utils::log(
                         format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
-                        format!("Predicate contains operation '!='"),
+                        format!("Predicate contains operation '>'"),
                     );
                     current_expr = ScalarExprType::Gt {
                         left: Box::new(left_expr.unwrap()),
@@ -861,7 +878,7 @@ fn prepare_where_clause(
                 sqlparser::ast::BinaryOperator::Lt => {
                     utils::log(
                         format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
-                        format!("Predicate contains operation '!='"),
+                        format!("Predicate contains operation '<'"),
                     );
                     current_expr = ScalarExprType::Lt {
                         left: Box::new(left_expr.unwrap()),

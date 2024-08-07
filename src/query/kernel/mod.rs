@@ -236,17 +236,15 @@ impl<E: StorageEngine> ExecContext<E> {
 
         if let PhysicalPlanExpr::Relational(RelationalExprType::ScanExpr(expr)) = physical_plan {
             {
-                let transaction = task::block_in_place(|| {
-                    utils::log(
-                        format!(
-                            "QueryEngine::Executor - TID: {:?}",
-                            self.transaction.as_ref().unwrap().id()
-                        ),
-                        format!("Locking storage_instance {:?}", SystemTime::now()),
-                    );
-                    self.get_transaction().unwrap()
-                    // do some compute-heavy work or call synchronous code
-                });
+                utils::log(
+                    format!(
+                        "QueryEngine::Executor - TID: {:?}",
+                        self.transaction.as_ref().unwrap().id()
+                    ),
+                    format!("Locking storage_instance {:?}", SystemTime::now()),
+                );
+
+                let transaction = self.get_transaction().unwrap();
 
                 // TODO: do proper error check
                 match expr.scan_type {
@@ -312,7 +310,7 @@ impl<E: StorageEngine> ExecContext<E> {
     pub fn join_table(&mut self, physical_plan: PhysicalPlanExpr) {}
 }
 
-fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Value, NaadanError> {
+pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Value, NaadanError> {
     match expr {
         ScalarExprType::Eq { left, right } => {
             let l = eval_predicate(&left, record).unwrap();

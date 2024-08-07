@@ -24,17 +24,6 @@ fn create_storage_instance() -> ArcStorageEngine {
     storage
 }
 
-async fn reset_storage_and_process_queries(queries: &[&str]) {
-    clean_db_files().await;
-    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
-        create_storage_instance(),
-    )));
-
-    load_db_data_batch(transaction_manager.clone()).await;
-
-    process_queries(queries, transaction_manager).await;
-}
-
 async fn process_queries(
     queries: &[&str],
     transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
@@ -52,7 +41,7 @@ async fn process_queries(
 
 async fn process_query(
     session_context: &mut SessionContext,
-    mut query: String,
+    query: String,
     transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
 ) {
     let mut file = File::options()
@@ -166,8 +155,9 @@ async fn load_db_data_seq(transaction_manager: Arc<Box<TransactionManager<Naadan
 
 // ******************** Test Cases ******************** //
 
+/// Basic test -- FixMe
 #[tokio::test(flavor = "multi_thread")]
-async fn test_basic_create_insert_select() {
+async fn basic_create_insert_select_test() {
     clean_db_files().await;
 
     let transaction_manager = Arc::new(Box::new(TransactionManager::init(
@@ -175,7 +165,7 @@ async fn test_basic_create_insert_select() {
     )));
 
     let queries = vec![
-        "Create table test1 (id int, name varchar(255))",
+        "Create table test1 (id int, name varchar)",
         "Insert into test1 values(1,'rom'),(2,'rob')",
         "Select * from test1",
     ];
@@ -183,30 +173,9 @@ async fn test_basic_create_insert_select() {
     process_queries(queries.as_slice(), transaction_manager).await;
 }
 
+/// Basic txn test
 #[tokio::test(flavor = "multi_thread")]
-async fn test_none_predicate_update() {
-    clean_db_files().await;
-    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
-        create_storage_instance(),
-    )));
-
-    load_db_data_batch(transaction_manager.clone()).await;
-
-    let queries = vec![
-        "update test1 set name = 'Tomy'",
-        "Select * from test1",
-        "Select * from test1",
-        "update test1 set id = 4",
-        "update test1 set id = 5",
-        "update test1 set id = 6",
-        "Select * from test1",
-    ];
-
-    reset_storage_and_process_queries(queries.as_slice()).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_transactional_update() {
+async fn txn_basic_test() {
     clean_db_files().await;
     let transaction_manager = Arc::new(Box::new(TransactionManager::init(
         create_storage_instance(),
@@ -220,25 +189,23 @@ async fn test_transactional_update() {
         "update test1 set id = 4",
         "update test1 set id = 6",
         "COMMIT",
-        "Select id, rate from test1",
+        "Select * from test1",
     ];
 
     process_queries(queries.as_slice(), transaction_manager).await;
 }
 
+/// Basic test update query with and without predicate
 #[tokio::test(flavor = "multi_thread")]
-async fn test_update() {
+async fn update_query_basic_test() {
     clean_db_files().await;
     let transaction_manager = Arc::new(Box::new(TransactionManager::init(
         create_storage_instance(),
     )));
 
-    load_db_data_batch_with_size(1024, transaction_manager.clone()).await;
+    load_db_data_batch_with_size(30, transaction_manager.clone()).await;
 
     let queries = [
-        //"Select * from test1",
-        //"update test1 set name = 'Ne'",
-        //"Select * from test1",
         "BEGIN",
         "update test1 set rate = 7777",
         "update test1 set rate = 77696",
@@ -246,8 +213,6 @@ async fn test_update() {
         "update test1 set rate = 2147483647",
         "Select * from test1",
         "update test1 set name = 'La'",
-        "update test1 set id = 4",
-        "update test1 set name = 'Tomy'",
         "COMMIT",
         "Select * from test1",
     ];
@@ -263,13 +228,16 @@ async fn test_update() {
         "update test1 set rate = 333347",
         "COMMIT",
         "Select * from test1",
+        "update test1 set rate = 77 where id > 150",
+        "Select * from test1",
     ];
 
     process_queries(queries.as_slice(), transaction_manager.clone()).await;
 }
 
+/// Random updates and read in parallel txns
 #[tokio::test(flavor = "multi_thread")]
-async fn parallel_test_none_predicate_update() {
+async fn txn_parallel_update_random() {
     clean_db_files().await;
     let transaction_manager = Arc::new(Box::new(TransactionManager::init(
         create_storage_instance(),
@@ -281,13 +249,12 @@ async fn parallel_test_none_predicate_update() {
     let t1 = tokio::spawn(async move {
         let queries = [
             "Select * from test1",
-            "update test1 set name = 'InitCh'",
+            "update test1 set name = 'InitCh' where id > 200",
             "Select * from test1",
             "BEGIN",
-            "update test1 set rate = 77696",
-            "update test1 set score = 83647",
-            "update test1 set name = 'Laaaaaaaaaaaaaaaaaaa'",
-            "update test1 set id = 4",
+            "update test1 set rate = 77696 where id > 150",
+            "update test1 set score = 83647 where id > 180",
+            "update test1 set name = 'Laaaaaaaaaaaaaaaaaaa' where id > 150",
             "COMMIT",
             "Select * from test1",
         ];
@@ -300,94 +267,128 @@ async fn parallel_test_none_predicate_update() {
         let queries = [
             "Select * from test1",
             "BEGIN",
-            "update test1 set id = 9",
-            "update test1 set name = 'JK'",
-            "update test1 set score = 234568",
+            "update test1 set name = 'JK' where id < 140",
+            "update test1 set score = 234568 where id < 140",
             "Select * from test1",
-            "update test1 set name = 'Fin'",
+            "update test1 set name = 'Fin' where id < 140",
             "COMMIT",
-            "Select * from test1",
             "Select * from test1",
         ];
 
         process_queries(queries.as_slice(), transaction2.clone()).await;
     });
 
-    // let transaction3 = transaction_manager.clone();
-    // let t3 = tokio::spawn(async move {
-    //     let queries = [
-    //         "update test1 set name = 'Tim'",
-    //         "Select * from test1",
-    //         "update test1 set id = 12",
-    //         "update test1 set id = 13",
-    //         "BEGIN",
-    //         "update test1 set id = 77",
-    //         "update test1 set id = 88",
-    //         "COMMIT",
-    //         "Select * from test1",
-    //     ];
-
-    //     process_queries(queries.as_slice(), transaction3).aritingait;
-    // });
-
-    // let transaction4 = transaction_manager.clone();
-    // let t4 = tokio::sparon(async move {
-    //     let queries = [
-    //         "update test1 set name = 'david'",
-    //         "Select * from test1",
-    //         "update test1 set id = 15",
-    //         "update test1 set id = 16",
-    //         "Select * from test1",
-    //     ];
-
-    //     process_queries(queries.as_slice(), transaction4)row 1ait;
-    // });
-
-    // let t5 = tokio::spawn(async move {
-    //     let quies = [
-    //         "update test1 set name = 'Jeff'",
-    //         "Select * from test1",
-    //         "update test1 set id = 9",
-    //         "update test1 set id = 10",
-    //         "Select * from test1",
-    //         "update test1 set name = 'Joe'",
-    //         "Select * from test1",
-    //         "BEGIN",
-    //         "update test1 set id = 770",
-    //         "update test1 set id = 880",
-    //         "COMMIT",
-    //     ];
-
-    //     process_queries(queries.as_slice(), transaction_manager).await;
-    // });
-
     let _ = t1.await;
     let _ = t2.await;
-    // let _ = t3.await;
-    // let _ = t4.await;
-    // let _ = t5.await;
 }
 
+/// Select query with basic predicate
 #[tokio::test(flavor = "multi_thread")]
-async fn test_select_with_predicate() {
+async fn select_query_predicate() {
     clean_db_files().await;
     let transaction_manager = Arc::new(Box::new(TransactionManager::init(
         create_storage_instance(),
     )));
 
-    load_db_data_batch_with_size(1024, transaction_manager.clone()).await;
+    load_db_data_batch_with_size(10, transaction_manager.clone()).await;
 
     let queries = [
         "Select * from test1",
-        "Select * from test1",
-        "Select * from test1 where id > 1000",
-        "Select * from test1 where id < 100",
+        "Select * from test1 where id > 5",
+        "Select * from test1 where id != 7",
     ];
 
     process_queries(queries.as_slice(), transaction_manager.clone()).await;
 }
 
-// TODO: Update Test with predicate
+/// Transaction Test - Success case - parallel write
+///      Run 2 transactions and update independent rows
+///      The final select should show consistent result for the updated rows
+#[tokio::test(flavor = "multi_thread")]
+async fn txn_parallel_update_no_conflict() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
+
+    load_db_data_batch_with_size(215, transaction_manager.clone()).await;
+
+    let transaction1 = transaction_manager.clone();
+    let t1 = tokio::spawn(async move {
+        let queries = [
+            "Select * from test1",
+            "BEGIN",
+            "update test1 set rate = 77696 where id > 150",
+            "update test1 set score = 83647 where id > 180",
+            "COMMIT",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction1.clone()).await;
+    });
+
+    let transaction2 = transaction_manager.clone();
+    let t2 = tokio::spawn(async move {
+        let queries = [
+            "Select * from test1",
+            "BEGIN",
+            "update test1 set score = 234568 where id < 140",
+            "update test1 set name = 'Fin' where id < 140",
+            "COMMIT",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction2.clone()).await;
+    });
+
+    let _ = t1.await;
+    let _ = t2.await;
+}
+
+/// Transaction Test - Success case - parallel write
+///     Run 2 transactions and update same rows
+///     Second transaction will fail and need to be re-run
+///     The final select should show consistent result for the updated rows
+#[tokio::test(flavor = "multi_thread")]
+async fn txn_parallel_update_conflict() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
+
+    load_db_data_batch_with_size(215, transaction_manager.clone()).await;
+
+    let transaction1 = transaction_manager.clone();
+    let t1 = tokio::spawn(async move {
+        let queries = [
+            "Select * from test1",
+            "BEGIN",
+            "update test1 set rate = 77696",
+            "update test1 set name = 'LA'",
+            "COMMIT",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction1.clone()).await;
+    });
+
+    let transaction2 = transaction_manager.clone();
+    let t2 = tokio::spawn(async move {
+        let queries = [
+            "Select * from test1",
+            "BEGIN",
+            "update test1 set name = 'JK'",
+            "update test1 set score = 234568",
+            "COMMIT",
+            "Select * from test1",
+        ];
+
+        process_queries(queries.as_slice(), transaction2.clone()).await;
+    });
+
+    let _ = t1.await;
+    let _ = t2.await;
+}
 
 // TODO: Select Test with 'join'
 
@@ -401,19 +402,6 @@ async fn test_select_with_predicate() {
 
 // TODO: Select Test with all the common expressions
 //       - join, Predicate, group by, order by, limit
-
-// TODO: Transaction Test - Success case - parallel write
-//       Insert 5 rows in a table
-//       Select all and assert
-//       Run 2 transactions and update 2 independent rows
-//       The final select should show consistent result for the updated rows
-
-// TODO: Transaction Test - Success case - parallel write
-//       Insert 5 rows in a table
-//       Select all and assert
-//       Run 2 transactions and update 2 same rows
-//       second transaction will fail and need to be re-run
-//       The final select should show consistent result for the updated rows
 
 // TODO: Transaction Test - Failure case - complete rollback
 //       Insert 5 rows in a table

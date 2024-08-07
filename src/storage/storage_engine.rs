@@ -294,11 +294,6 @@ impl StorageEngine for NaadanStorageEngine {
 
     /// This will block on read lock for storage layer structures
     fn scan_table<'a>(&'a self, scan_types: &'a ScanType, schema: &'a Table) -> ScanIterator {
-        let row_index_guard = self.row_index.blocking_read();
-        let buffer_pool_guard = self.buffer_pool.blocking_read();
-
-        let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
-
         match scan_types {
             ScanType::Filter(predicate) => {
                 let row_count = self
@@ -307,9 +302,17 @@ impl StorageEngine for NaadanStorageEngine {
                     .get(&(schema.id as usize))
                     .unwrap()
                     .row_count as u64;
+                let row_index_guard = self.row_index.blocking_read();
+                let buffer_pool_guard = self.buffer_pool.blocking_read();
+
+                let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
                 return ScanIterator::new(RowScanType::Filter(predicate, row_count), schema, guard);
             }
             ScanType::RowIds(row_ids) => {
+                let row_index_guard = self.row_index.blocking_read();
+                let buffer_pool_guard = self.buffer_pool.blocking_read();
+
+                let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
                 return ScanIterator::new(RowScanType::ExplicitRowScan(row_ids), schema, guard);
             }
             ScanType::Full => {
@@ -319,6 +322,10 @@ impl StorageEngine for NaadanStorageEngine {
                     .get(&(schema.id as usize))
                     .unwrap()
                     .row_count as u64;
+                let row_index_guard = self.row_index.blocking_read();
+                let buffer_pool_guard = self.buffer_pool.blocking_read();
+
+                let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
                 return ScanIterator::new(RowScanType::FullScan(row_count), schema, guard);
             }
         }

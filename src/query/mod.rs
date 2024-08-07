@@ -5,7 +5,7 @@ use self::parser::NaadanParser;
 use crate::storage::{catalog::Column, NaadanError};
 use sqlparser::ast::{Expr, Statement};
 
-mod kernel;
+pub mod kernel;
 pub mod parser;
 pub mod plan;
 pub mod query_engine;

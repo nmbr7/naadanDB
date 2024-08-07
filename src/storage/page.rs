@@ -691,13 +691,13 @@ impl Page {
                 last_dyn_offset = self.header.last_dynamic_size_offset as u64;
             }
         };
-        utils::log(
-            "Page".to_string(),
-            format!(
-                "Updating row at offset {}\n - dyn_cursor_base at {}\n - last_dynamic_size_offset at {}\n - last_fixed_size_offset at {}",
-                row_offset, dyn_cursor_base, self.header.last_dynamic_size_offset, self.header.last_fixed_size_offset
-            ),
-        );
+        // utils::log(
+        //     "Page".to_string(),
+        //     format!(
+        //         "Updating row at offset {}\n - dyn_cursor_base at {}\n - last_dynamic_size_offset at {}\n - last_fixed_size_offset at {}",
+        //         row_offset, dyn_cursor_base, self.header.last_dynamic_size_offset, self.header.last_fixed_size_offset
+        //     ),
+        // );
 
         // If the updated columns have variable types and the length of the variable columns + last dynmaic offset
         // is greater than last fixed size offset, return page capacity full error.
@@ -721,13 +721,13 @@ impl Page {
             let update_offset = row_offset + col_offset;
 
             buf_cursor.set_position(update_offset);
-            utils::log(
-                "Page".to_string(),
-                format!(
-                    "Updating column at offset {} and last dyn offset is {}\n",
-                    update_offset, last_dyn_offset
-                ),
-            );
+            // utils::log(
+            //     "Page".to_string(),
+            //     format!(
+            //         "Updating column at offset {} and last dyn offset is {}\n",
+            //         update_offset, last_dyn_offset
+            //     ),
+            // );
 
             // TODO: Handle existing string allocation or mark it free
             // TODO: Add check for available space.
