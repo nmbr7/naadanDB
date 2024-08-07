@@ -62,23 +62,23 @@ Most core components are written from scratch except for the parser, for which w
 
 ### SQL level
 
-- Join
-- Predicates
-- Group by, Order by, Limit
-- Stored procedures
-- Cursors
-- Triggers
-- Partitioning
-- Replication
+- [ ] Join
+- [x] Predicates
+- [ ] Group by, Order by, Limit
+- [ ] Stored procedures
+- [ ] Cursors
+- [ ] Triggers
+- [ ] Partitioning
+- [ ] Replication
 
 ### DB Design level
 
-- DB Configurability support
-- Target Webassembly runtime
-- Proper recovery support
-- Lock-free data structures
-- Optimistic latching
-- Stream processing
-- Column store
-- JIT query execution
-- Distributed operation
+- [ ] DB Configurability support
+- [ ] Target Webassembly runtime
+- [ ] Proper recovery support
+- [ ] Lock-free data structures
+- [ ] Optimistic latching
+- [ ] Stream processing
+- [ ] Column store
+- [ ] JIT query execution
+- [ ] Distributed operation
