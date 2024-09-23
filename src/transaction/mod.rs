@@ -538,8 +538,10 @@ impl<'a, E: StorageEngine> Iterator for MvccScanIterator<'a, E> {
 
             let row = self.row_iter.next();
             match row {
+                Some(Err(_)) | None => return None,
                 Some(mut row_value) => {
                     // println!("{:?}", row_value);
+
                     let row_id: u64 = row_value.as_ref().unwrap().row_id();
                     let transaction_start_timestamp = self
                         .transaction
@@ -591,7 +593,6 @@ impl<'a, E: StorageEngine> Iterator for MvccScanIterator<'a, E> {
                     }
                     return Some(row_value);
                 }
-                None => return None,
             }
         }
     }

@@ -302,6 +302,7 @@ impl StorageEngine for NaadanStorageEngine {
                     .get(&(schema.id as usize))
                     .unwrap()
                     .row_count as u64;
+
                 let row_index_guard = self.row_index.blocking_read();
                 let buffer_pool_guard = self.buffer_pool.blocking_read();
 
@@ -316,16 +317,19 @@ impl StorageEngine for NaadanStorageEngine {
                 return ScanIterator::new(RowScanType::ExplicitRowScan(row_ids), schema, guard);
             }
             ScanType::Full => {
-                let row_count = self
-                    .table_index
-                    .blocking_read()
-                    .get(&(schema.id as usize))
-                    .unwrap()
-                    .row_count as u64;
+                let table_index_guard = self.table_index.blocking_read();
+
                 let row_index_guard = self.row_index.blocking_read();
                 let buffer_pool_guard = self.buffer_pool.blocking_read();
 
                 let guard = ScanGuard::new(Some(row_index_guard), Some(buffer_pool_guard));
+
+                let table_metadata = table_index_guard.get(&(schema.id as usize));
+                if let None = table_metadata {
+                    return ScanIterator::new(RowScanType::FullScan(0), schema, guard);
+                }
+
+                let row_count = table_metadata.unwrap().row_count as u64;
                 return ScanIterator::new(RowScanType::FullScan(row_count), schema, guard);
             }
         }
