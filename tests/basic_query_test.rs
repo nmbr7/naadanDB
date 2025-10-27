@@ -153,6 +153,36 @@ async fn load_db_data_seq(transaction_manager: Arc<Box<TransactionManager<Naadan
     process_queries(str_array.as_slice(), transaction_manager.clone()).await;
 }
 
+/// Load data for JOIN test scenarios with two related tables
+async fn load_join_test_data(
+    transaction_manager: Arc<Box<TransactionManager<NaadanStorageEngine>>>,
+) {
+    let mut queries: Vec<String> = vec![
+        "Create table users (id int, name varchar, department_id int)".to_string(),
+        "Create table departments (id int, dept_name varchar, location varchar)".to_string(),
+    ];
+
+    // Insert department data
+    for dept_id in 1..=5 {
+        queries.push(format!(
+            "Insert into departments (id, dept_name, location) values({}, 'Dept{}', 'Location{}')",
+            dept_id, dept_id, dept_id
+        ));
+    }
+
+    // Insert user data with foreign key references to departments
+    for user_id in 1..=20 {
+        let dept_id = ((user_id - 1) % 5) + 1; // Distribute users across departments
+        queries.push(format!(
+            "Insert into users (id, name, department_id) values({}, 'User{}', {})",
+            user_id, user_id, dept_id
+        ));
+    }
+
+    let str_array: Vec<&str> = queries.iter().map(|s| s.as_str()).collect();
+    process_queries(str_array.as_slice(), transaction_manager.clone()).await;
+}
+
 // ******************** Test Cases ******************** //
 
 /// Basic test -- FixMe
@@ -165,8 +195,8 @@ async fn basic_create_insert_select_test() {
     )));
 
     let queries = vec![
-        "Create table test1 (id int, name varchar)",
-        "Insert into test1 values(1,'rom'),(2,'rob')",
+        "Create table test1239 (id int, name varchar)",
+        "Insert into test1239 values(1,'rom'),(2,'rob')",
         "Select * from test1",
     ];
 
@@ -294,7 +324,7 @@ async fn select_query_predicate() {
 
     let queries = [
         "Select * from test1",
-        "Select * from test1 where id > 5",
+        "Select * from test1 where score > 5",
         "Select * from test1 where id != 7",
     ];
 
@@ -311,15 +341,15 @@ async fn txn_parallel_update_no_conflict() {
         create_storage_instance(),
     )));
 
-    load_db_data_batch_with_size(215, transaction_manager.clone()).await;
+    load_db_data_batch_with_size(1_000, transaction_manager.clone()).await;
 
     let transaction1 = transaction_manager.clone();
     let t1 = tokio::spawn(async move {
         let queries = [
             "Select * from test1",
             "BEGIN",
-            "update test1 set rate = 77696 where id > 150",
-            "update test1 set score = 83647 where id > 180",
+            "update test1 set rate = 77696 where id > 500",
+            "update test1 set score = 83647 where id > 500",
             "COMMIT",
             "Select * from test1",
         ];
@@ -332,8 +362,8 @@ async fn txn_parallel_update_no_conflict() {
         let queries = [
             "Select * from test1",
             "BEGIN",
-            "update test1 set score = 234568 where id < 140",
-            "update test1 set name = 'Fin' where id < 140",
+            "update test1 set score = 234568 where id < 500",
+            "update test1 set name = 'Fin' where id < 500",
             "COMMIT",
             "Select * from test1",
         ];
@@ -356,7 +386,7 @@ async fn txn_parallel_update_conflict() {
         create_storage_instance(),
     )));
 
-    load_db_data_batch_with_size(215, transaction_manager.clone()).await;
+    load_db_data_batch_with_size(1_000, transaction_manager.clone()).await;
 
     let transaction1 = transaction_manager.clone();
     let t1 = tokio::spawn(async move {
@@ -390,9 +420,197 @@ async fn txn_parallel_update_conflict() {
     let _ = t2.await;
 }
 
-// TODO: Select Test with 'join'
+/// Multi-table test with inserts and filtered selects
+/// Creates 5 tables with different schemas, inserts 50 entries each, and tests various select operations
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_table_insert_select_with_filters_test() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
 
-// TODO: Select Test with 'join with predicate'
+    // Create 5 different tables with various data types
+    let table_creation_queries = vec![
+        // Table 1: Employee table
+        "Create table employees (id int, name varchar, age int, salary int)",
+        // Table 2: Products table
+        "Create table products (product_id int, product_name varchar, price int, category_id int)",
+        // Table 3: Orders table
+        "Create table orders (order_id int, customer_name varchar, total_amount int, order_date varchar)",
+        // Table 4: Students table
+        "Create table students (student_id int, student_name varchar, grade int, subject varchar)",
+        // Table 5: Inventory table
+        "Create table inventory (item_id int, item_name varchar, quantity int, warehouse_id int)",
+    ];
+
+    // Create all tables
+    process_queries(
+        table_creation_queries.as_slice(),
+        transaction_manager.clone(),
+    )
+    .await;
+
+    // Insert 50 entries into employees table
+    let mut employee_inserts = Vec::new();
+    for i in 1..=50 {
+        employee_inserts.push(format!(
+            "Insert into employees (id, name, age, salary) values({}, 'Employee{}', {}, {})",
+            i,
+            i,
+            25 + (i % 40),
+            30000 + (i * 1000)
+        ));
+    }
+
+    // Insert 50 entries into products table
+    let mut product_inserts = Vec::new();
+    let categories = vec!["Electronics", "Clothing", "Books", "Home", "Sports"];
+    for i in 1..=50 {
+        product_inserts.push(format!(
+            "Insert into products (product_id, product_name, price, category_id) values({}, 'Product{}', {}, {})",
+            i, i, 100 + (i * 50), (i % 5) + 1
+        ));
+    }
+
+    // Insert 50 entries into orders table
+    let mut order_inserts = Vec::new();
+    for i in 1..=50 {
+        order_inserts.push(format!(
+            "Insert into orders (order_id, customer_name, total_amount, order_date) values({}, 'Customer{}', {}, '2024-01-{}')",
+            i, i, 500 + (i * 100), (i % 28) + 1
+        ));
+    }
+
+    // Insert 50 entries into students table
+    let mut student_inserts = Vec::new();
+    let subjects = vec!["Math", "Science", "English", "History", "Art"];
+    for i in 1..=50 {
+        student_inserts.push(format!(
+            "Insert into students (student_id, student_name, grade, subject) values({}, 'Student{}', {}, '{}')",
+            i, i, 80 + (i % 20), subjects[(i-1) % subjects.len()]
+        ));
+    }
+
+    // Insert 50 entries into inventory table
+    let mut inventory_inserts = Vec::new();
+    for i in 1..=50 {
+        inventory_inserts.push(format!(
+            "Insert into inventory (item_id, item_name, quantity, warehouse_id) values({}, 'Item{}', {}, {})",
+            i, i, 10 + (i * 5), (i % 3) + 1
+        ));
+    }
+
+    // Convert to string slices for processing
+    let employee_queries: Vec<&str> = employee_inserts.iter().map(|s| s.as_str()).collect();
+    let product_queries: Vec<&str> = product_inserts.iter().map(|s| s.as_str()).collect();
+    let order_queries: Vec<&str> = order_inserts.iter().map(|s| s.as_str()).collect();
+    let student_queries: Vec<&str> = student_inserts.iter().map(|s| s.as_str()).collect();
+    let inventory_queries: Vec<&str> = inventory_inserts.iter().map(|s| s.as_str()).collect();
+
+    // Process all insert queries
+    process_queries(employee_queries.as_slice(), transaction_manager.clone()).await;
+    process_queries(product_queries.as_slice(), transaction_manager.clone()).await;
+    process_queries(order_queries.as_slice(), transaction_manager.clone()).await;
+    process_queries(student_queries.as_slice(), transaction_manager.clone()).await;
+    process_queries(inventory_queries.as_slice(), transaction_manager.clone()).await;
+
+    // Test SELECT * from all tables
+    let select_all_queries = vec![
+        "Select * from employees",
+        "Select * from products",
+        "Select * from orders",
+        "Select * from students",
+        "Select * from inventory",
+    ];
+
+    process_queries(select_all_queries.as_slice(), transaction_manager.clone()).await;
+
+    // Test SELECT with various WHERE conditions
+    let filtered_select_queries = vec![
+        // Employee filters
+        "Select * from employees where age > 40",
+        "Select * from employees where salary > 35000",
+        "Select * from employees where id <= 10",
+        // Product filters
+        "Select * from products where price > 1000",
+        "Select * from products where category_id = 1",
+        "Select * from products where product_id >= 25",
+        // Order filters
+        "Select * from orders where total_amount > 2000",
+        "Select * from orders where order_id < 20",
+        // Student filters
+        "Select * from students where grade > 90",
+        "Select * from students where student_id <= 25",
+        // Inventory filters
+        "Select * from inventory where quantity > 100",
+        "Select * from inventory where warehouse_id = 2",
+        "Select * from inventory where item_id >= 40",
+    ];
+
+    process_queries(
+        filtered_select_queries.as_slice(),
+        transaction_manager.clone(),
+    )
+    .await;
+
+    // Test some specific value filters
+    let specific_value_queries = vec![
+        "Select * from employees where id = 15",
+        "Select * from products where product_id = 30",
+        "Select * from orders where order_id = 25",
+        "Select * from students where student_id = 20",
+        "Select * from inventory where item_id = 35",
+    ];
+
+    process_queries(
+        specific_value_queries.as_slice(),
+        transaction_manager.clone(),
+    )
+    .await;
+}
+
+/// Select Test with 'join' - Basic JOIN test
+#[tokio::test(flavor = "multi_thread")]
+async fn select_query_join_basic() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
+
+    // Load test data with two related tables
+    load_join_test_data(transaction_manager.clone()).await;
+
+    let queries = [
+        "Select * from users",
+        "Select * from departments",
+        "Select users.id, users.name, departments.dept_name from users JOIN departments ON users.department_id = departments.id",
+        "Select u.name, d.dept_name, d.location from users u JOIN departments d ON u.department_id = d.id",
+    ];
+
+    process_queries(queries.as_slice(), transaction_manager.clone()).await;
+}
+
+/// Select Test with 'join with predicate' - JOIN with WHERE conditions
+#[tokio::test(flavor = "multi_thread")]
+async fn select_query_join_with_predicate() {
+    clean_db_files().await;
+    let transaction_manager = Arc::new(Box::new(TransactionManager::init(
+        create_storage_instance(),
+    )));
+
+    // Load test data with two related tables
+    load_join_test_data(transaction_manager.clone()).await;
+
+    let queries = [
+        "Select * from users",
+        "Select * from departments",
+        "Select users.id, users.name, departments.dept_name from users JOIN departments ON users.department_id = departments.id WHERE users.id > 10",
+        "Select u.name, d.dept_name from users u JOIN departments d ON u.department_id = d.id WHERE d.id <= 3",
+        "Select u.id, u.name, d.dept_name, d.location from users u JOIN departments d ON u.department_id = d.id WHERE u.id > 5 AND d.id < 4",
+    ];
+
+    process_queries(queries.as_slice(), transaction_manager.clone()).await;
+}
 
 // TODO: Select Test with 'limit'
 

@@ -140,6 +140,15 @@ pub enum ScalarExprType {
         right: Box<ScalarExprType>,
     },
 
+    Ge {
+        left: Box<ScalarExprType>,
+        right: Box<ScalarExprType>,
+    },
+    Le {
+        left: Box<ScalarExprType>,
+        right: Box<ScalarExprType>,
+    },
+
     Identifier {
         value: String,
     },

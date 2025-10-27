@@ -998,10 +998,10 @@ mod tests {
             ("ic3".to_string(), Column::new(ColumnType::Float, 0, false)),
         ]);
 
-        for i in 1..2 as u32 {
+        for i in 1..2 {
             let table = Table {
                 name: "user".to_string(),
-                id: 60 as u16,
+                id: 60,
                 schema: schema.clone(),
                 column_schema_size: 0,
                 indexes: HashSet::new(),

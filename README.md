@@ -10,6 +10,7 @@ naadanDB
 <br>
   
 # Project Goals
+
 1. Learn and experiment with various database design techniques.
 2. Implement a database that efficiently handles hybrid (OLTP & OLAP) workloads.
 3. Create documentation about different techniques.
@@ -48,7 +49,7 @@ Most core components are written from scratch except for the parser, for which w
   - [x] Executor
 - Transaction Layer
   - [x] MVCC with in-memory version chaining
-  - [x] Support Serializable Isolation level
+  - [x] Support Snaphost Isolation level
 - Storage Layer
   - [x] Row store format
   - [x] B-tree index

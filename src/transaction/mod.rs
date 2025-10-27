@@ -599,7 +599,10 @@ impl<'a, E: StorageEngine> Iterator for MvccScanIterator<'a, E> {
 }
 
 impl<E: StorageEngine> StorageEngine for MvccTransaction<E> {
-    type ScanIterator<'a> = MvccScanIterator<'a, E> where E: 'a;
+    type ScanIterator<'a>
+        = MvccScanIterator<'a, E>
+    where
+        E: 'a;
     fn write_table_rows(
         &self,
         row_values: crate::query::RecordSet,

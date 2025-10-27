@@ -147,12 +147,13 @@ impl StorageEngine for NaadanStorageEngine {
                 // );
 
                 for r_id in row_id..row_end {
-                    row_index.insert(r_id as u64, page_id);
+                    let raw_row_id = ((table.id as u64) << 32) | r_id;
+                    row_index.insert(raw_row_id, page_id);
                     utils::log(
                         "Storage_engine".to_string(),
                         format!(
                             "Updating row_index with values row id {} and page id {}",
-                            r_id,
+                            raw_row_id,
                             page_id.get_page_index()
                         ),
                     );
@@ -234,7 +235,8 @@ impl StorageEngine for NaadanStorageEngine {
                 });
 
                 for r_id in row_id_list {
-                    let page_id = match row_index.get(&r_id) {
+                    let raw_row_id = ((schema.id as u64) << 32) | r_id;
+                    let page_id = match row_index.get(&raw_row_id) {
                         Some(pageid) => {
                             row_ids.push(r_id);
                             pageid
@@ -398,40 +400,42 @@ impl<'a> Iterator for ScanIterator<'a> {
             }
         };
 
-        loop {
-            let row_id = match row_ids.get(self.current_index) {
-                Some(row_id) => row_id,
-                None => return None,
-            };
+        let row_id = row_ids.get(self.current_index)?;
 
-            let page_id = match self.guard.row_index_guard.as_ref().unwrap().get(row_id) {
-                Some(pageid) => pageid,
-                None => return Some(Err(NaadanError::RowNotFound)),
-            };
+        let raw_row_id = ((self.schema.id as u64) << 32) | row_id;
+        let page_id = match self
+            .guard
+            .row_index_guard
+            .as_ref()
+            .unwrap()
+            .get(&raw_row_id)
+        {
+            Some(pageid) => pageid,
+            None => return Some(Err(NaadanError::RowNotFound)),
+        };
 
-            let page = self
-                .guard
-                .buffer_pool_guard
-                .as_ref()
-                .unwrap()
-                .get(&page_id)
-                .unwrap();
+        let page = self
+            .guard
+            .buffer_pool_guard
+            .as_ref()
+            .unwrap()
+            .get(&page_id)
+            .unwrap();
 
-            utils::log(
-                "Storage_engine".to_string(),
-                format!("Row id {} in Page id: {}", row_id, page_id.get_page_index()),
-            );
-            let row = page.read_table_row(row_id, self.schema).unwrap();
+        utils::log(
+            "Storage_engine".to_string(),
+            format!("Row id {} in Page id: {}", row_id, page_id.get_page_index()),
+        );
+        let row = page.read_table_row(row_id, self.schema).unwrap();
 
-            self.current_index += 1;
+        self.current_index += 1;
 
-            if let Some(_predicate) = scan_predicate {
-                // TODO check predicate againt the row
-                // if predicate fails, get net row,
-            }
-
-            return Some(Ok(row));
+        if let Some(_predicate) = scan_predicate {
+            // TODO check predicate againt the row
+            // if predicate fails, get net row,
         }
+
+        return Some(Ok(row));
     }
 }
 

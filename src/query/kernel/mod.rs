@@ -291,6 +291,13 @@ impl<E: StorageEngine> ExecContext<E> {
 
                 for row in self.last_result.as_ref().unwrap() {
                     // TODO: do proper error check
+                    utils::log(
+                        format!(
+                            "QueryEngine::Executor - TID: {:?}",
+                            self.transaction.as_ref().unwrap().id()
+                        ),
+                        format!("Filter expression {:?}\n row {:?}\n", expr, row),
+                    );
                     let res = eval_predicate(&expr.borrow(), row);
                     match res {
                         Ok(Value::Boolean(true)) => result.add_record(row.clone()),
@@ -360,6 +367,42 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
         }
         ScalarExprType::Lt { left, right } => {
             let l = eval_predicate(&left, record).unwrap();
+            let r = eval_predicate(right, record).unwrap();
+
+            match (l, r) {
+                (Value::Boolean(lv), Value::Boolean(rv)) => Err(NaadanError::Unknown),
+                (Value::Number(lv, _), Value::Number(rv, _)) => {
+                    let lv_int = lv.parse::<usize>().unwrap();
+                    let rv_int = rv.parse::<usize>().unwrap();
+                    Ok(Value::Boolean(lv_int.le(&rv_int)))
+                }
+                (Value::SingleQuotedString(lv), Value::SingleQuotedString(rv)) => {
+                    Ok(Value::Boolean(lv.le(&rv)))
+                }
+                _ => Ok(Value::Boolean(false)),
+            }
+        }
+
+        ScalarExprType::Ge { left, right } => {
+            let l = eval_predicate(&left, record).unwrap();
+            let r = eval_predicate(&right, record).unwrap();
+            let res = match (l, r) {
+                (Value::Boolean(lv), Value::Boolean(rv)) => Err(NaadanError::Unknown),
+                (Value::Number(lv, _), Value::Number(rv, _)) => {
+                    let lv_int = lv.parse::<usize>().unwrap();
+                    let rv_int = rv.parse::<usize>().unwrap();
+                    Ok(Value::Boolean(lv_int.ge(&rv_int)))
+                }
+                (Value::SingleQuotedString(lv), Value::SingleQuotedString(rv)) => {
+                    Ok({ Value::Boolean(lv.ge(&rv)) })
+                }
+                _ => Ok(Value::Boolean(false)),
+            };
+
+            res
+        }
+        ScalarExprType::Le { left, right } => {
+            let l = eval_predicate(&left, record).unwrap();
             let r = eval_predicate(&right, record).unwrap();
             let res = match (l, r) {
                 (Value::Boolean(lv), Value::Boolean(rv)) => Err(NaadanError::Unknown),
@@ -384,7 +427,15 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
                 catalog::ColumnType::UnSupported => Err(NaadanError::Unknown),
                 _ => {
                     // TODO: Fix column index not known issue.
-                    if let Some(Expr::Value(val)) = record.columns().get(col_val.offset as usize) {
+                    let column_index = record
+                        .column_schema
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .position(|val| val.0 == value)
+                        .unwrap();
+
+                    if let Some(Expr::Value(val)) = record.columns().get(column_index) {
                         Ok(val.clone())
                     } else {
                         Err(NaadanError::Unknown)

@@ -220,8 +220,6 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
 
             exec_physical_plan(&physical_plan, &mut exec_context);
 
-            let elapsed_time = now.elapsed();
-
             if exec_context.last_op_status.unwrap_or(true) {
                 match session_context.transaction_type() {
                     // Retry implicit internal transactions
@@ -229,6 +227,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                         let result = self
                             .transaction_manager
                             .commit_transaction(session_context.transaction_id());
+                        let elapsed_time = now.elapsed();
 
                         match result {
                             Ok(()) => {
@@ -268,6 +267,7 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
                         if session_context.transaction_id() == 0 {
                             session_context.set_transaction_type(TransactionType::Implicit)
                         }
+                        let elapsed_time = now.elapsed();
                         return Ok(QueryResult::new(
                             ExecStats::new(begin_time, elapsed_time),
                             exec_context.last_result,
@@ -536,10 +536,19 @@ impl<E: StorageEngine> NaadanQueryEngine<E> {
             }
             Statement::Commit { chain } => {
                 if session_context.transaction_id() > 0 {
+                    let now = Instant::now();
                     let result = self
                         .transaction_manager
                         .commit_transaction(session_context.transaction_id());
+                    let elapsed_time = now.elapsed();
 
+                    utils::log(
+                        format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                        format!(
+                            "Commit finished in {:.3}ms",
+                            elapsed_time.as_micros() as f64 / 1000.0
+                        ),
+                    );
                     session_context.set_transaction_id(0);
                     session_context.set_transaction_type(TransactionType::Implicit);
 
@@ -822,15 +831,15 @@ fn prep_inner_phy_plan<'a, E: StorageEngine>(
         _ => return Err(NaadanError::PhysicalPlanFailed),
     };
 
-    let mut aa: Vec<Rc<RefCell<PhysicalPlan<'a, E>>>> = vec![];
-    for l_expr in plan.next_expr.iter() {
-        let mut pp = Plan::init();
-        pp.set_plan_expr(l_expr.borrow().plan_expr.clone());
-        let p = prep_inner_phy_plan(&pp).unwrap();
-        aa.push(rc_ref_cell!(p));
+    let mut phy_plan_list: Vec<Rc<RefCell<PhysicalPlan<'a, E>>>> = vec![];
+    for next_logical_expr in plan.next_expr.iter() {
+        let mut plan_wrapper = Plan::init();
+        plan_wrapper.set_plan_expr(next_logical_expr.borrow().plan_expr.clone());
+        let new_phy_plan_node = prep_inner_phy_plan(&plan_wrapper).unwrap();
+        phy_plan_list.push(rc_ref_cell!(new_phy_plan_node));
     }
 
-    exec_plan.next_expr = aa;
+    exec_plan.next_expr = phy_plan_list;
 
     return Ok(exec_plan);
 }
@@ -885,8 +894,26 @@ fn prepare_where_clause(
                         right: Box::new(right_expr.unwrap()),
                     }
                 }
-                sqlparser::ast::BinaryOperator::GtEq => todo!(),
-                sqlparser::ast::BinaryOperator::LtEq => todo!(),
+                sqlparser::ast::BinaryOperator::GtEq => {
+                    utils::log(
+                        format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                        format!("Predicate contains operation '>='"),
+                    );
+                    current_expr = ScalarExprType::Ge {
+                        left: Box::new(left_expr.unwrap()),
+                        right: Box::new(right_expr.unwrap()),
+                    }
+                }
+                sqlparser::ast::BinaryOperator::LtEq => {
+                    utils::log(
+                        format!("QueryEngine - TID: {:?}", session_context.transaction_id()),
+                        format!("Predicate contains operation '<='"),
+                    );
+                    current_expr = ScalarExprType::Le {
+                        left: Box::new(left_expr.unwrap()),
+                        right: Box::new(right_expr.unwrap()),
+                    }
+                }
                 sqlparser::ast::BinaryOperator::Spaceship => todo!(),
                 sqlparser::ast::BinaryOperator::Eq => {
                     utils::log(
