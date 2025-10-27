@@ -228,7 +228,7 @@ impl<E: StorageEngine> ExecContext<E> {
                 "QueryEngine::Executor - TID: {:?}",
                 self.transaction.as_ref().unwrap().id()
             ),
-            format!("Scanning table"),
+            "Scanning table".to_string(),
         );
 
         let mut error = false;
@@ -273,7 +273,7 @@ impl<E: StorageEngine> ExecContext<E> {
                 "QueryEngine::Executor - TID: {:?}",
                 self.transaction.as_ref().unwrap().id()
             ),
-            format!("Filtering"),
+            "Filtering".to_string(),
         );
 
         utils::log(
@@ -320,8 +320,8 @@ impl<E: StorageEngine> ExecContext<E> {
 pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Value, NaadanError> {
     match expr {
         ScalarExprType::Eq { left, right } => {
-            let l = eval_predicate(&left, record).unwrap();
-            let r = eval_predicate(&right, record).unwrap();
+            let l = eval_predicate(left, record).unwrap();
+            let r = eval_predicate(right, record).unwrap();
             let res = match (l, r) {
                 (Value::Boolean(lv), Value::Boolean(rv)) => Value::Boolean(lv == rv),
                 (Value::Number(lv, _), Value::Number(rv, _)) => Value::Boolean(lv.eq(&rv)),
@@ -334,8 +334,8 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
             Ok(res)
         }
         ScalarExprType::NEq { left, right } => {
-            let l = eval_predicate(&left, record).unwrap();
-            let r = eval_predicate(&right, record).unwrap();
+            let l = eval_predicate(left, record).unwrap();
+            let r = eval_predicate(right, record).unwrap();
             let res = match (l, r) {
                 (Value::Boolean(lv), Value::Boolean(rv)) => Value::Boolean(lv != rv),
                 (Value::Number(lv, _), Value::Number(rv, _)) => Value::Boolean(lv.ne(&rv)),
@@ -348,9 +348,10 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
             Ok(res)
         }
         ScalarExprType::Gt { left, right } => {
-            let l = eval_predicate(&left, record).unwrap();
-            let r = eval_predicate(&right, record).unwrap();
-            let res = match (l, r) {
+            let l = eval_predicate(left, record).unwrap();
+            let r = eval_predicate(right, record).unwrap();
+
+            match (l, r) {
                 (Value::Boolean(lv), Value::Boolean(rv)) => Err(NaadanError::Unknown),
                 (Value::Number(lv, _), Value::Number(rv, _)) => {
                     let lv_int = lv.parse::<usize>().unwrap();
@@ -358,15 +359,13 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
                     Ok(Value::Boolean(lv_int.gt(&rv_int)))
                 }
                 (Value::SingleQuotedString(lv), Value::SingleQuotedString(rv)) => {
-                    Ok({ Value::Boolean(lv.gt(&rv)) })
+                    Ok(Value::Boolean(lv.gt(&rv)))
                 }
                 _ => Ok(Value::Boolean(false)),
-            };
-
-            res
+            }
         }
         ScalarExprType::Lt { left, right } => {
-            let l = eval_predicate(&left, record).unwrap();
+            let l = eval_predicate(left, record).unwrap();
             let r = eval_predicate(right, record).unwrap();
 
             match (l, r) {
@@ -384,9 +383,9 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
         }
 
         ScalarExprType::Ge { left, right } => {
-            let l = eval_predicate(&left, record).unwrap();
-            let r = eval_predicate(&right, record).unwrap();
-            let res = match (l, r) {
+            let l = eval_predicate(left, record).unwrap();
+            let r = eval_predicate(right, record).unwrap();
+            match (l, r) {
                 (Value::Boolean(lv), Value::Boolean(rv)) => Err(NaadanError::Unknown),
                 (Value::Number(lv, _), Value::Number(rv, _)) => {
                     let lv_int = lv.parse::<usize>().unwrap();
@@ -394,17 +393,16 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
                     Ok(Value::Boolean(lv_int.ge(&rv_int)))
                 }
                 (Value::SingleQuotedString(lv), Value::SingleQuotedString(rv)) => {
-                    Ok({ Value::Boolean(lv.ge(&rv)) })
+                    Ok(Value::Boolean(lv.ge(&rv)))
                 }
                 _ => Ok(Value::Boolean(false)),
-            };
-
-            res
+            }
         }
         ScalarExprType::Le { left, right } => {
-            let l = eval_predicate(&left, record).unwrap();
-            let r = eval_predicate(&right, record).unwrap();
-            let res = match (l, r) {
+            let l = eval_predicate(left, record).unwrap();
+            let r = eval_predicate(right, record).unwrap();
+
+            match (l, r) {
                 (Value::Boolean(lv), Value::Boolean(rv)) => Err(NaadanError::Unknown),
                 (Value::Number(lv, _), Value::Number(rv, _)) => {
                     let lv_int = lv.parse::<usize>().unwrap();
@@ -415,9 +413,7 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
                     Ok(Value::Boolean(lv.lt(&rv)))
                 }
                 _ => Ok(Value::Boolean(false)),
-            };
-
-            res
+            }
         }
 
         ScalarExprType::Identifier { value } => {
@@ -426,7 +422,6 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
             match col_val.column_type {
                 catalog::ColumnType::UnSupported => Err(NaadanError::Unknown),
                 _ => {
-                    // TODO: Fix column index not known issue.
                     let column_index = record
                         .column_schema
                         .as_ref()
@@ -443,6 +438,6 @@ pub fn eval_predicate(expr: &ScalarExprType, record: &NaadanRecord) -> Result<Va
                 }
             }
         }
-        ScalarExprType::Const { value } => return Ok(value.clone()),
+        ScalarExprType::Const { value } => Ok(value.clone()),
     }
 }
