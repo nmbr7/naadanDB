@@ -50,7 +50,7 @@ Most core components are written from scratch except for the parser, for which w
 - Transaction Layer
   - [x] MVCC with in-memory version chaining
   - [x] Support Snaphost Isolation level
-- Storage Layer
+- Data and Storage Layer
   - [x] Row store format
   - [x] B-tree index
   - [x] Custom binary Page structure
